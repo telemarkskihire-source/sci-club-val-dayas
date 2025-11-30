@@ -1,11 +1,12 @@
 # streamlit_app.py
-# Sci Club Val d'Ayas · MVP v2
+# Sci Club Val d'Ayas · MVP v3
 #
 # - Inizializza il database
-# - Crea dati di esempio (utenti, categorie, atleti, eventi)
-# - Permette di scegliere un utente (admin / coach / genitore)
-# - Dashboard per ruolo
-# - Pannello GENITORE: può aggiornare presenza, sci in ski-room e auto (per gare)
+# - Seed di esempio (utenti, categorie, atleti, eventi)
+# - Scelta utente (admin / coach / genitore)
+# - Admin: dashboard riassuntiva
+# - Genitore: può aggiornare presenza / sci in ski-room / auto (per gare)
+# - Allenatore: per ogni evento vede elenco atleti, stato, ski-room, auto, riepilogo posti
 
 from __future__ import annotations
 
@@ -179,7 +180,7 @@ def render_admin_dashboard(db: Session, user: User):
         st.divider()
 
 
-# ---------- DASHBOARD COACH ----------
+# ---------- DASHBOARD COACH (dettaglio evento) ----------
 
 def render_coach_dashboard(db: Session, user: User):
     st.header("Pannello Allenatore")
@@ -195,6 +196,7 @@ def render_coach_dashboard(db: Session, user: User):
 
     cat_ids = [c.category_id for c in coach_cats]
     categories = db.query(Category).filter(Category.id.in_(cat_ids)).all()
+    cat_map = {c.id: c for c in categories}
 
     st.subheader("Categorie seguite")
     st.write(", ".join(c.name for c in categories))
@@ -207,19 +209,90 @@ def render_coach_dashboard(db: Session, user: User):
         .all()
     )
 
-    st.subheader("Prossimi eventi")
+    st.subheader("Prossimi eventi delle tue categorie")
     if not events:
         st.info("Nessun evento futuro per le tue categorie.")
         return
 
     for ev in events:
-        st.markdown(f"### {ev.date} — {ev.title}")
-        st.caption(
-            f"{'Allenamento' if ev.type == 'training' else 'Gara'} · "
-            f"{ev.location or '-'}"
-        )
-        st.caption(ev.description or "")
-        st.divider()
+        cat = cat_map.get(ev.category_id)
+        is_race = ev.type == "race"
+
+        with st.expander(
+            f"{ev.date} · {ev.title} "
+            f"({cat.name if cat else '-'}) "
+            f"- {'Gara' if is_race else 'Allenamento'}",
+            expanded=False,
+        ):
+            if ev.description:
+                st.caption(ev.description)
+            if ev.location:
+                st.caption(f"Località: {ev.location}")
+
+            # Recupera presenze con join sugli atleti
+            rows = (
+                db.query(EventAttendance, Athlete)
+                .join(Athlete, EventAttendance.athlete_id == Athlete.id)
+                .filter(EventAttendance.event_id == ev.id)
+                .order_by(Athlete.name.asc())
+                .all()
+            )
+
+            if not rows:
+                st.info("Nessun atleta collegato a questo evento.")
+                continue
+
+            # riepilogo numerico
+            present = sum(1 for a, _ in rows if a.status == "present")
+            absent = sum(1 for a, _ in rows if a.status == "absent")
+            undecided = sum(1 for a, _ in rows if a.status == "undecided")
+
+            skis_count = sum(1 for a, _ in rows if a.skis_in_skiroom)
+            car_drivers = sum(1 for a, _ in rows if a.car_available)
+            total_car_seats = sum((a.car_seats or 0) for a, _ in rows)
+
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Presenze previste", present)
+            col2.metric("Assenti", absent)
+            col3.metric("Da confermare", undecided)
+            col4.metric("Sci in ski-room", skis_count)
+
+            col5, col6 = st.columns(2)
+            col5.metric("Automuniti", car_drivers)
+            col6.metric("Posti auto totali", total_car_seats)
+
+            st.markdown("----")
+            st.markdown("**Dettaglio atleti:**")
+
+            # tabella semplice
+            table_data = []
+            for att, athlete in rows:
+                status_icon = {
+                    "present": "✅ Presente",
+                    "absent": "❌ Assente",
+                    "undecided": "❓ Da confermare",
+                }.get(att.status, att.status)
+
+                skis_label = "🎿 Sì" if att.skis_in_skiroom else "—"
+                if att.car_available:
+                    car_label = f"🚗 Sì ({att.car_seats or 0} posti)"
+                else:
+                    car_label = "—"
+
+                table_data.append(
+                    {
+                        "Atleta": athlete.name,
+                        "Stato": status_icon,
+                        "Sci in ski-room": skis_label,
+                        "Auto": car_label if is_race else "N/A" if not is_race else car_label,
+                    }
+                )
+
+            st.table(table_data)
+
+            st.markdown(
+                "_Nota: in questa versione l'allenatore vede ma non modifica; le modifiche vengono dal genitore._"
+            )
 
 
 # ---------- DASHBOARD GENITORE (con aggiornamento presenza/sci/auto) ----------
@@ -254,13 +327,12 @@ def render_parent_dashboard(db: Session, user: User):
     )
 
     if not events:
-        st.subheader("Prossimi eventi")
+        st.subheader("Prossimi eventi per i tuoi figli")
         st.info("Nessun evento futuro.")
         return
 
     st.subheader("Prossimi eventi per i tuoi figli")
 
-    # mappa categorie
     categories = db.query(Category).filter(Category.id.in_(cat_ids)).all()
     cat_map = {c.id: c for c in categories}
 
@@ -279,7 +351,6 @@ def render_parent_dashboard(db: Session, user: User):
             if ev.location:
                 st.caption(f"Località: {ev.location}")
 
-            # per ciascun figlio nella categoria dell'evento
             for ath in athletes:
                 if ath.category_id != ev.category_id:
                     continue
@@ -293,7 +364,6 @@ def render_parent_dashboard(db: Session, user: User):
                     .first()
                 )
 
-                # se per qualche motivo non esiste, la creiamo
                 if att is None:
                     att = EventAttendance(
                         event_id=ev.id,
@@ -311,7 +381,6 @@ def render_parent_dashboard(db: Session, user: User):
                     "absent": "Assente",
                 }
                 reverse_status_map = {v: k for k, v in status_label_map.items()}
-
                 current_status_label = status_label_map.get(
                     att.status, "Da confermare"
                 )
@@ -357,10 +426,7 @@ def render_parent_dashboard(db: Session, user: User):
                         else:
                             car_seats = 0
 
-                if st.button(
-                    "Salva",
-                    key=f"save_{ev.id}_{ath.id}",
-                ):
+                if st.button("Salva", key=f"save_{ev.id}_{ath.id}"):
                     att.status = reverse_status_map[chosen_label]
                     att.skis_in_skiroom = skis_flag
                     if is_race:
@@ -396,11 +462,7 @@ def main():
         st.write("Seleziona utente:")
 
         users = db.query(User).order_by(User.role, User.name).all()
-
-        options = {
-            f"{u.name} ({get_role_label(u.role)})": u.id for u in users
-        }
-
+        options = {f"{u.name} ({get_role_label(u.role)})": u.id for u in users}
         selected = st.selectbox("Utente", list(options.keys()))
         current_user = db.query(User).get(options[selected])
 
