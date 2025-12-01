@@ -42,10 +42,11 @@ def render_coach_dashboard(db: Session, user: User) -> None:
         .all()
     )
 
+    # -------- TABS: EVENTI | COMUNICAZIONI --------
     tab_eventi, tab_messaggi = st.tabs(["Eventi", "Comunicazioni"])
 
     with tab_eventi:
-        _render_events_view(db, user, events, cat_map)
+        _render_events_view(db, events, cat_map)
 
     with tab_messaggi:
         _render_messages_view(db, user, categories, cat_ids)
@@ -53,8 +54,7 @@ def render_coach_dashboard(db: Session, user: User) -> None:
 
 # ---------- EVENTI ----------
 
-
-def _render_events_view(db: Session, user: User, events, cat_map):
+def _render_events_view(db: Session, events, cat_map):
     st.subheader("Prossimi eventi delle tue categorie")
     if not events:
         st.info("Nessun evento futuro per le tue categorie.")
@@ -98,7 +98,7 @@ def _render_events_view(db: Session, user: User, events, cat_map):
             col1, col2, col3, col4 = st.columns(4)
             col1.metric("Presenze previste", present)
             col2.metric("Assenti", absent)
-            col3.metric("Da confermare", undeciced := undecided)
+            col3.metric("Da confermare", undecided)
             col4.metric("Sci in ski-room", skis_count)
 
             col5, col6 = st.columns(2)
@@ -141,7 +141,6 @@ def _render_events_view(db: Session, user: User, events, cat_map):
 
 # ---------- MESSAGGI ----------
 
-
 def _render_messages_view(
     db: Session,
     user: User,
@@ -152,11 +151,9 @@ def _render_messages_view(
 
     tab_nuovo, tab_storico = st.tabs(["Nuovo messaggio", "Storico inviati"])
 
-    # --- Nuovo messaggio ---
     with tab_nuovo:
         _render_new_message_form(db, user, categories, cat_ids)
 
-    # --- Storico ---
     with tab_storico:
         msgs = (
             db.query(Message)
@@ -190,7 +187,6 @@ def _render_new_message_form(
 ) -> None:
     st.markdown("Invia una comunicazione ai genitori.")
 
-    # recupera atleti delle categorie del coach
     athletes = (
         db.query(Athlete)
         .filter(Athlete.category_id.in_(cat_ids))
