@@ -1,3 +1,65 @@
+# ui_parent.py
+from datetime import date, datetime
+import streamlit as st
+from sqlalchemy.orm import Session
+from core.models import (
+    User,
+    Category,
+    Athlete,
+    ParentAthlete,
+    Event,
+    EventAttendance,
+    Message,
+    AthleteReport,
+)
+
+
+# ---------- LABELS ----------
+status_label_map = {
+    "undecided": "Da confermare",
+    "present": "Presente",
+    "absent": "Assente",
+}
+reverse_status_map = {v: k for k, v in status_label_map.items()}
+
+
+# ---------- ENTRYPOINT ----------
+def render_parent_dashboard(db: Session, user: User):
+    st.header("Pannello Genitore")
+
+    links = (
+        db.query(ParentAthlete)
+        .filter(ParentAthlete.parent_id == user.id)
+        .all()
+    )
+    if not links:
+        st.info("Nessun atleta collegato.")
+        return
+
+    athlete_ids = [l.athlete_id for l in links]
+    athletes = db.query(Athlete).filter(Athlete.id.in_(athlete_ids)).all()
+    athlete_map = {a.id: a for a in athletes}
+
+    st.subheader("I tuoi atleti")
+    st.write(", ".join(a.name for a in athletes))
+
+    cat_ids = list({a.category_id for a in athletes if a.category_id})
+
+    events_tab, messages_tab, reports_tab = st.tabs(
+        ["Eventi", "Messaggi", "Report"]
+    )
+
+    with events_tab:
+        _render_events_view(db, user, athletes, cat_ids)
+
+    with messages_tab:
+        _render_messages_view(db, user)
+
+    with reports_tab:
+        _render_reports_view(db, user, athletes)
+
+
+# ---------- EVENTI ----------
 def _render_events_view(db: Session, user: User, athletes, cat_ids):
     today = date.today()
     events = (
@@ -78,7 +140,6 @@ def _render_events_view(db: Session, user: User, athletes, cat_ids):
                         horizontal=True,
                     )
 
-                    # Sci in ski-room solo se il coach lo ha richiesto
                     skis_flag = att.skis_in_skiroom
                     if ev.ask_skiroom:
                         skis_flag = st.checkbox(
@@ -87,7 +148,6 @@ def _render_events_view(db: Session, user: User, athletes, cat_ids):
                             key=f"skiroom_{ev.id}_{ath.id}",
                         )
 
-                # Auto solo per gare + richiesta coach
                 car_flag = att.car_available
                 car_seats = att.car_seats or 0
 
@@ -115,7 +175,7 @@ def _render_events_view(db: Session, user: User, athletes, cat_ids):
 
                 if st.button("Salva", key=f"save_{ev.id}_{ath.id}"):
                     att.status = reverse_status_map[chosen_label]
-                    att.skis_in_skiroom = skis_flag
+                    att.skis_in_skiroom = skis_flag if ev.ask_skiroom else False
                     att.car_available = car_flag if (is_race and ev.ask_carpool) else False
                     att.car_seats = car_seats if (is_race and ev.ask_carpool) else 0
 
@@ -126,3 +186,49 @@ def _render_events_view(db: Session, user: User, athletes, cat_ids):
                     st.success("Dati aggiornati per questo atleta.")
 
             st.markdown("---")
+
+
+# ---------- MESSAGGI ----------
+def _render_messages_view(db: Session, user: User):
+    st.subheader("Messaggi ricevuti")
+
+    msgs = (
+        db.query(Message)
+        .filter((Message.athlete_id != None) | (Message.category_id != None))
+        .order_by(Message.created_at.desc())
+        .all()
+    )
+
+    if not msgs:
+        st.info("Nessun messaggio.")
+        return
+
+    for msg in msgs:
+        st.markdown(f"### {msg.title}")
+        st.caption(f"{msg.created_at} — da {msg.sender.name}")
+        st.write(msg.content)
+        st.markdown("---")
+
+
+# ---------- REPORT ----------
+def _render_reports_view(db: Session, user: User, athletes):
+    st.subheader("Report personali dei tuoi atleti")
+
+    athlete_ids = [a.id for a in athletes]
+
+    reports = (
+        db.query(AthleteReport)
+        .filter(AthleteReport.athlete_id.in_(athlete_ids))
+        .order_by(AthleteReport.created_at.desc())
+        .all()
+    )
+
+    if not reports:
+        st.info("Ancora nessun report.")
+        return
+
+    for rep in reports:
+        st.markdown(f"### {rep.athlete.name} — {rep.event.date} — {rep.event.title}")
+        st.caption(f"Allenatore: {rep.coach.name} — {rep.created_at}")
+        st.write(rep.content or "_Nessun testo_")
+        st.markdown("---")
