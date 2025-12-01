@@ -89,6 +89,10 @@ class Event(Base):
     location = Column(String(200), nullable=True)
     date = Column(Date, nullable=False)
 
+    # nuove opzioni logistiche (decise dall'allenatore)
+    ask_skiroom = Column(Boolean, default=False)   # chiedo di lasciare sci in ski-room?
+    ask_carpool = Column(Boolean, default=False)   # chiedo disponibilità auto? (solo gare)
+
     category = relationship("Category", back_populates="events")
     attendances = relationship("EventAttendance", back_populates="event")
     team_reports = relationship("TeamReport", back_populates="event")
