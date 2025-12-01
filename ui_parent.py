@@ -12,6 +12,8 @@ from core.models import (
     Event,
     EventAttendance,
     Message,
+    TeamReport,
+    AthleteReport,
     User,
 )
 
@@ -42,13 +44,16 @@ def render_parent_dashboard(db: Session, user: User) -> None:
     st.subheader("I tuoi atleti")
     st.write(", ".join(a.name for a in athletes))
 
-    tab_eventi, tab_messaggi = st.tabs(["Eventi", "Messaggi"])
+    tab_eventi, tab_messaggi, tab_report = st.tabs(["Eventi", "Messaggi", "Report"])
 
     with tab_eventi:
         _render_events_view(db, user, athletes, cat_ids)
 
     with tab_messaggi:
         _render_messages_view(db, user, athletes, athlete_ids, cat_ids)
+
+    with tab_report:
+        _render_reports_view(db, user, athletes, athlete_ids, cat_ids)
 
 
 # ---------- EVENTI + PRESENZE ----------
@@ -175,7 +180,7 @@ def _render_events_view(db: Session, user: User, athletes, cat_ids):
             st.markdown("---")
 
 
-# ---------- MESSAGGI (INBOX GENITORI) ----------
+# ---------- MESSAGGI ----------
 
 def _render_messages_view(
     db: Session,
@@ -222,3 +227,85 @@ def _render_messages_view(
         st.caption(f"{target} · {msg.created_at.strftime('%d/%m/%Y %H:%M')}")
         st.write(msg.content)
         st.markdown("---")
+
+
+# ---------- REPORT (GENITORE) ----------
+
+def _render_reports_view(
+    db: Session,
+    user: User,
+    athletes,
+    athlete_ids,
+    cat_ids,
+):
+    st.subheader("Report allenamenti / gare")
+
+    categories = db.query(Category).filter(Category.id.in_(cat_ids)).all()
+    cat_map = {c.id: c for c in categories}
+    athlete_map = {a.id: a for a in athletes}
+
+    # Tutti gli eventi (passati e futuri) delle categorie dei figli
+    events = (
+        db.query(Event)
+        .filter(Event.category_id.in_(cat_ids))
+        .order_by(Event.date.desc())
+        .all()
+    )
+
+    if not events:
+        st.info("Nessun evento con report.")
+        return
+
+    any_report = False
+
+    for ev in events:
+        # report di squadra per l'evento
+        team_reps = (
+            db.query(TeamReport)
+            .filter(TeamReport.event_id == ev.id)
+            .order_by(TeamReport.created_at.desc())
+            .all()
+        )
+
+        # report personali per i tuoi figli
+        a_reps = (
+            db.query(AthleteReport)
+            .filter(
+                AthleteReport.event_id == ev.id,
+                AthleteReport.athlete_id.in_(athlete_ids),
+            )
+            .order_by(AthleteReport.created_at.desc())
+            .all()
+        )
+
+        if not team_reps and not a_reps:
+            continue
+
+        any_report = True
+        cat = cat_map.get(ev.category_id)
+        with st.expander(
+            f"{ev.date} · {ev.title} ({cat.name if cat else '-'})",
+            expanded=False,
+        ):
+            if team_reps:
+                st.markdown("### Report di squadra")
+                for rep in team_reps:
+                    st.caption(
+                        f"Inserito il {rep.created_at.strftime('%d/%m/%Y %H:%M')}"
+                    )
+                    st.write(rep.content or "—")
+                    st.markdown("---")
+
+            if a_reps:
+                st.markdown("### Report personali")
+                for rep in a_reps:
+                    ath = athlete_map.get(rep.athlete_id)
+                    st.markdown(f"**Per {ath.name if ath else rep.athlete_id}**")
+                    st.caption(
+                        f"Inserito il {rep.created_at.strftime('%d/%m/%Y %H:%M')}"
+                    )
+                    st.write(rep.content or "—")
+                    st.markdown("---")
+
+    if not any_report:
+        st.info("Non ci sono ancora report per i tuoi figli.")
