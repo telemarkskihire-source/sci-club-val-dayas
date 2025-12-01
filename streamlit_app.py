@@ -1,5 +1,5 @@
 # streamlit_app.py
-# Sci Club Val d'Ayas · main con pagina login
+# Sci Club Val d'Ayas · main con pagina login + ruoli
 
 from __future__ import annotations
 
@@ -12,6 +12,8 @@ from ui_coach import render_coach_dashboard
 from ui_parent import render_parent_dashboard
 
 
+# ---------- UTILS ----------
+
 def get_role_label(role: str) -> str:
     return {
         "admin": "Admin",
@@ -21,14 +23,18 @@ def get_role_label(role: str) -> str:
 
 
 def get_current_user(db) -> User:
-    """Gestisce la pagina di login e restituisce l'utente loggato."""
+    """
+    Gestisce il login:
+    - se c'è current_user_id in session_state, restituisce l'utente
+    - altrimenti mostra la schermata di login
+    """
 
-    # già loggato?
+    # Utente già loggato?
     if "current_user_id" in st.session_state:
         user = db.query(User).get(st.session_state["current_user_id"])
         if user:
             return user
-        # se l'utente non esiste più, resettiamo
+        # se non esiste più, azzero la sessione
         st.session_state.pop("current_user_id", None)
 
     # --- Schermata di login ---
@@ -37,18 +43,23 @@ def get_current_user(db) -> User:
 
     users = db.query(User).order_by(User.role, User.name).all()
     if not users:
-        st.error("Nessun utente definito. Usa l'admin per creare utenti.")
+        st.error("Nessun utente definito. Accedi come admin e crea gli utenti.")
         st.stop()
 
     options = {f"{u.name} ({get_role_label(u.role)})": u.id for u in users}
-    label = st.selectbox("Seleziona utente (demo login)", list(options.keys()))
+    labels = list(options.keys())
+
+    selected_label = st.selectbox("Seleziona utente (demo login)", labels)
 
     if st.button("Entra"):
-        st.session_state["current_user_id"] = options[label]
-        st.experimental_rerun()
+        st.session_state["current_user_id"] = options[selected_label]
+        st.rerun()  # nuova API, niente experimental
 
+    # finché non clicchi Entra, non c'è un utente corrente
     st.stop()
 
+
+# ---------- MAIN APP ----------
 
 def main() -> None:
     st.set_page_config(
@@ -57,13 +68,14 @@ def main() -> None:
         layout="wide",
     )
 
+    # Inizializza DB e dati demo
     init_db_and_seed()
     db = get_db()
 
-    # login
+    # Login / selezione utente
     current_user = get_current_user(db)
 
-    # sidebar solo informativa + logout
+    # Sidebar con info utente + logout
     with st.sidebar:
         st.title("Sci Club Val d'Ayas")
         st.caption(
@@ -72,9 +84,9 @@ def main() -> None:
         )
         if st.button("Logout"):
             st.session_state.pop("current_user_id", None)
-            st.experimental_rerun()
+            st.rerun()
 
-    # contenuto principale
+    # Contenuto principale per ruolo
     if current_user.role == "admin":
         render_admin_dashboard(db, current_user)
     elif current_user.role == "coach":
