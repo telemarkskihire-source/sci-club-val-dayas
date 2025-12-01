@@ -1,5 +1,7 @@
 # ui_admin.py
 from datetime import date, datetime
+import io
+import csv
 
 import streamlit as st
 from sqlalchemy.orm import Session
@@ -312,9 +314,9 @@ def _athletes_tab(db: Session) -> None:
             db.add(link)
             db.commit()
             st.success("Collegamento creato.")
-    
 
-# ------------------ EVENTI ------------------ #
+
+# ------------------ EVENTI (+ EXPORT CSV) ------------------ #
 
 
 def _events_tab(db: Session) -> None:
@@ -325,18 +327,65 @@ def _events_tab(db: Session) -> None:
         st.info("Prima crea almeno una categoria.")
         return
 
-    # elenco eventi
     events = db.query(Event).order_by(Event.date.desc()).all()
     cat_map = {c.id: c for c in categories}
 
     if events:
         st.markdown("### Eventi esistenti")
+
         for ev in events:
             cat = cat_map.get(ev.category_id)
-            st.write(
-                f"- **{ev.date} · {ev.title}** "
-                f"({ 'Gara' if ev.type == 'race' else 'Allenamento' } · {cat.name if cat else '-'})"
-            )
+
+            with st.expander(
+                f"{ev.date} · {ev.title} "
+                f"({ 'Gara' if ev.type == 'race' else 'Allenamento' } · "
+                f"{cat.name if cat else '-'})",
+                expanded=False,
+            ):
+                if ev.description:
+                    st.write(ev.description)
+                if ev.location:
+                    st.caption(f"Località: {ev.location}")
+
+                # riepilogo presenze
+                rows = (
+                    db.query(EventAttendance, Athlete)
+                    .join(Athlete, EventAttendance.athlete_id == Athlete.id)
+                    .filter(EventAttendance.event_id == ev.id)
+                    .order_by(Athlete.name.asc())
+                    .all()
+                )
+
+                if rows:
+                    present = sum(1 for a, _ in rows if a.status == "present")
+                    absent = sum(1 for a, _ in rows if a.status == "absent")
+                    undecided = sum(1 for a, _ in rows if a.status == "undecided")
+                    skis_count = sum(1 for a, _ in rows if a.skis_in_skiroom)
+                    car_drivers = sum(1 for a, _ in rows if a.car_available)
+                    total_car_seats = sum((a.car_seats or 0) for a, _ in rows)
+
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("Presenze previste", present)
+                    col2.metric("Assenti", absent)
+                    col3.metric("Da confermare", undecided)
+                    col4.metric("Sci in ski-room", skis_count)
+
+                    col5, col6 = st.columns(2)
+                    col5.metric("Automuniti", car_drivers)
+                    col6.metric("Posti auto totali", total_car_seats)
+
+                    # bottone download CSV
+                    csv_bytes = _build_event_csv(ev, rows)
+                    st.download_button(
+                        label="Scarica presenze (CSV)",
+                        data=csv_bytes,
+                        file_name=f"presenze_{ev.id}_{ev.date}.csv",
+                        mime="text/csv",
+                        key=f"dl_csv_{ev.id}",
+                    )
+                else:
+                    st.info("Nessuna presenza ancora registrata.")
+
     else:
         st.info("Nessun evento presente.")
 
@@ -394,3 +443,46 @@ def _events_tab(db: Session) -> None:
 
         db.commit()
         st.success("Evento creato e presenze iniziali generate.")
+
+
+def _build_event_csv(ev: Event, rows) -> bytes:
+    """Crea CSV (in memoria) con elenco presenze di un evento."""
+    buffer = io.StringIO()
+    writer = csv.writer(buffer, delimiter=";")
+
+    # header
+    writer.writerow(
+        [
+            "Evento ID",
+            "Data",
+            "Titolo",
+            "Tipo",
+            "Atleta",
+            "Stato",
+            "Sci in ski-room",
+            "Automunito",
+            "Posti auto",
+        ]
+    )
+
+    for att, athlete in rows:
+        status = att.status
+        skis = "SI" if att.skis_in_skiroom else "NO"
+        car = "SI" if att.car_available else "NO"
+        seats = att.car_seats or 0
+
+        writer.writerow(
+            [
+                ev.id,
+                ev.date.isoformat(),
+                ev.title,
+                ev.type,
+                athlete.name,
+                status,
+                skis,
+                car,
+                seats,
+            ]
+        )
+
+    return buffer.getvalue().encode("utf-8")
