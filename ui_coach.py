@@ -5,6 +5,7 @@ import streamlit as st
 from sqlalchemy.orm import Session
 
 from core.models import (
+    User,
     Category,
     Athlete,
     CoachCategory,
@@ -13,7 +14,13 @@ from core.models import (
     Message,
     TeamReport,
     AthleteReport,
-    User,
+    DeviceToken,
+)
+from notifications import (
+    notify_message_created,
+    notify_logistics_changed,
+    notify_team_report,
+    notify_athlete_report,
 )
 
 
@@ -44,8 +51,8 @@ def render_coach_dashboard(db: Session, user: User) -> None:
         .all()
     )
 
-    tab_eventi, tab_messaggi, tab_report = st.tabs(
-        ["Eventi", "Comunicazioni", "Report"]
+    tab_eventi, tab_messaggi, tab_report, tab_settings = st.tabs(
+        ["Eventi", "Comunicazioni", "Report", "Impostazioni"]
     )
 
     with tab_eventi:
@@ -57,9 +64,11 @@ def render_coach_dashboard(db: Session, user: User) -> None:
     with tab_report:
         _render_reports_view(db, user, categories, cat_ids)
 
+    with tab_settings:
+        _render_settings_view(db, user)
+
 
 # ---------- EVENTI ----------
-
 
 def _render_events_view(db: Session, events, cat_map):
     st.subheader("Prossimi eventi delle tue categorie")
@@ -82,8 +91,8 @@ def _render_events_view(db: Session, events, cat_map):
             if ev.location:
                 st.caption(f"Località: {ev.location}")
 
-            # --- Impostazioni logistiche decise dal coach ---
-            st.markdown("**Richieste logistiche**")
+            # --- impostazioni logistiche ---
+            st.markdown("**Richieste logistiche verso i genitori**")
             ask_skiroom = st.checkbox(
                 "Chiedi di lasciare gli sci in ski-room",
                 value=ev.ask_skiroom,
@@ -106,10 +115,11 @@ def _render_events_view(db: Session, events, cat_map):
                     ev.ask_carpool = False
                 db.commit()
                 st.success("Impostazioni logistiche aggiornate.")
+                notify_logistics_changed(db, ev)
 
             st.markdown("---")
 
-            # --- Presenze & riepilogo ---
+            # --- riepilogo presenze ---
             rows = (
                 db.query(EventAttendance, Athlete)
                 .join(Athlete, EventAttendance.athlete_id == Athlete.id)
@@ -134,10 +144,7 @@ def _render_events_view(db: Session, events, cat_map):
             col1.metric("Presenze previste", present)
             col2.metric("Assenti", absent)
             col3.metric("Da confermare", undecided)
-            if ev.ask_skiroom:
-                col4.metric("Sci in ski-room", skis_count)
-            else:
-                col4.metric("Sci in ski-room", "-")
+            col4.metric("Sci in ski-room", skis_count if ev.ask_skiroom else 0)
 
             if is_race and ev.ask_carpool:
                 col5, col6 = st.columns(2)
@@ -175,9 +182,8 @@ def _render_events_view(db: Session, events, cat_map):
 
             st.table(table_data)
             st.markdown(
-                "_Nota: in questa versione l'allenatore vede ma non modifica le presenze; le modifiche vengono dal genitore._"
+                "_Nota: l'allenatore qui vede i dati inseriti dai genitori._"
             )
-
 
 
 # ---------- MESSAGGI ----------
@@ -207,12 +213,13 @@ def _render_messages_view(
             st.info("Non hai ancora inviato messaggi.")
         else:
             for msg in msgs:
-                target = "Tutto il club"
                 if msg.athlete_id:
-                    target = f"Personale (atleta id {msg.athlete_id})"
+                    target = f"Genitori atleta ID {msg.athlete_id}"
                 elif msg.category_id:
                     cat = next((c for c in categories if c.id == msg.category_id), None)
                     target = f"Categoria: {cat.name if cat else msg.category_id}"
+                else:
+                    target = "Tutto il club"
 
                 st.markdown(f"**{msg.title}**")
                 st.caption(
@@ -247,9 +254,6 @@ def _render_new_message_form(
     selected_athlete_id = None
 
     if audience_type == "Categoria":
-        if not categories:
-            st.warning("Non hai categorie associate.")
-            return
         cat_label_map = {c.name: c.id for c in categories}
         label = st.selectbox("Categoria", list(cat_label_map.keys()))
         selected_category_id = cat_label_map[label]
@@ -282,6 +286,7 @@ def _render_new_message_form(
         db.add(msg)
         db.commit()
         st.success("Messaggio inviato.")
+        notify_message_created(db, msg)
 
 
 # ---------- REPORT ----------
@@ -294,7 +299,6 @@ def _render_reports_view(
 ) -> None:
     st.subheader("Report allenamenti / gare")
 
-    # Eventi di tutte le categorie del coach, passati e futuri
     events = (
         db.query(Event)
         .filter(Event.category_id.in_(cat_ids))
@@ -347,6 +351,7 @@ def _render_reports_view(
             team_rep.created_at = datetime.utcnow()
         db.commit()
         st.success("Report generale salvato.")
+        notify_team_report(db, team_rep)
 
     st.markdown("---")
     st.markdown("### Report personali per atleta")
@@ -398,5 +403,51 @@ def _render_reports_view(
                 a_rep.created_at = datetime.utcnow()
             db.commit()
             st.success(f"Nota salvata per {athlete.name}.")
+            notify_athlete_report(db, a_rep)
 
         st.markdown("---")
+
+
+# ---------- IMPOSTAZIONI (FCM TOKEN) ----------
+
+def _render_settings_view(db: Session, user: User) -> None:
+    st.subheader("Impostazioni notifiche")
+
+    st.markdown(
+        "Per ricevere notifiche push, incolla qui il tuo **Firebase device token** "
+        "(ottenuto dalla app / browser)."
+    )
+
+    existing = (
+        db.query(DeviceToken)
+        .filter(DeviceToken.user_id == user.id)
+        .order_by(DeviceToken.created_at.desc())
+        .first()
+    )
+
+    default_token = existing.token if existing else ""
+
+    with st.form("fcm_token_form_coach"):
+        token = st.text_input("FCM device token", value=default_token)
+        submitted = st.form_submit_button("Salva token")
+
+    if submitted:
+        token = token.strip()
+        if not token:
+            st.error("Il token non può essere vuoto.")
+            return
+
+        row = (
+            db.query(DeviceToken)
+            .filter(DeviceToken.user_id == user.id)
+            .first()
+        )
+        if row:
+            row.token = token
+            row.last_used_at = datetime.utcnow()
+        else:
+            row = DeviceToken(user_id=user.id, platform="web", token=token)
+            db.add(row)
+
+        db.commit()
+        st.success("Token salvato. Ora puoi ricevere notifiche push.")
