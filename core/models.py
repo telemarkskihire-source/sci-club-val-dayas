@@ -29,6 +29,7 @@ class User(Base):
     sent_messages = relationship("Message", back_populates="sender")
     team_reports = relationship("TeamReport", back_populates="coach")
     athlete_reports = relationship("AthleteReport", back_populates="coach")
+    device_tokens = relationship("DeviceToken", back_populates="user")
 
 
 class Category(Base):
@@ -89,9 +90,9 @@ class Event(Base):
     location = Column(String(200), nullable=True)
     date = Column(Date, nullable=False)
 
-    # nuove opzioni logistiche (decise dall'allenatore)
-    ask_skiroom = Column(Boolean, default=False)   # chiedo di lasciare sci in ski-room?
-    ask_carpool = Column(Boolean, default=False)   # chiedo disponibilità auto? (solo gare)
+    # richieste logistiche decise dal coach
+    ask_skiroom = Column(Boolean, default=False)   # chiedo sci in ski-room?
+    ask_carpool = Column(Boolean, default=False)   # chiedo auto (solo gare)?
 
     category = relationship("Category", back_populates="events")
     attendances = relationship("EventAttendance", back_populates="event")
@@ -165,3 +166,17 @@ class AthleteReport(Base):
     event = relationship("Event", back_populates="athlete_reports")
     athlete = relationship("Athlete", back_populates="personal_reports")
     coach = relationship("User", back_populates="athlete_reports")
+
+
+class DeviceToken(Base):
+    __tablename__ = "device_tokens"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    platform = Column(String(50), nullable=False, default="web")  # es. "web", "android"
+    token = Column(String(512), nullable=False, unique=True)
+
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_used_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+    user = relationship("User", back_populates="device_tokens")
