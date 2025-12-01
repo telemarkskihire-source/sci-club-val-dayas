@@ -1,5 +1,5 @@
 # ui_coach.py
-from datetime import date
+from datetime import date, datetime
 
 import streamlit as st
 from sqlalchemy.orm import Session
@@ -11,6 +11,8 @@ from core.models import (
     Event,
     EventAttendance,
     Message,
+    TeamReport,
+    AthleteReport,
     User,
 )
 
@@ -42,13 +44,18 @@ def render_coach_dashboard(db: Session, user: User) -> None:
         .all()
     )
 
-    tab_eventi, tab_messaggi = st.tabs(["Eventi", "Comunicazioni"])
+    tab_eventi, tab_messaggi, tab_report = st.tabs(
+        ["Eventi", "Comunicazioni", "Report"]
+    )
 
     with tab_eventi:
         _render_events_view(db, events, cat_map)
 
     with tab_messaggi:
         _render_messages_view(db, user, categories, cat_ids)
+
+    with tab_report:
+        _render_reports_view(db, user, categories, cat_ids)
 
 
 # ---------- EVENTI ----------
@@ -144,7 +151,7 @@ def _render_messages_view(
     db: Session,
     user: User,
     categories: list[Category],
-    cat_ids: list[str],
+    cat_ids: list[int],
 ) -> None:
     st.subheader("Comunicazioni con i genitori")
 
@@ -184,7 +191,7 @@ def _render_new_message_form(
     db: Session,
     user: User,
     categories: list[Category],
-    cat_ids: list[str],
+    cat_ids: list[int],
 ) -> None:
     st.markdown("Invia una comunicazione ai genitori.")
 
@@ -216,7 +223,7 @@ def _render_new_message_form(
         if not athletes:
             st.warning("Nessun atleta collegato alle tue categorie.")
             return
-        ath_label_map = {f"{a.name} ({a.id[:6]})": a.id for a in athletes}
+        ath_label_map = {f"{a.name} ({a.id})": a.id for a in athletes}
         label = st.selectbox("Atleta", list(ath_label_map.keys()))
         selected_athlete_id = ath_label_map[label]
 
@@ -240,3 +247,121 @@ def _render_new_message_form(
         db.add(msg)
         db.commit()
         st.success("Messaggio inviato.")
+
+
+# ---------- REPORT ----------
+
+def _render_reports_view(
+    db: Session,
+    user: User,
+    categories: list[Category],
+    cat_ids: list[int],
+) -> None:
+    st.subheader("Report allenamenti / gare")
+
+    # Eventi di tutte le categorie del coach, passati e futuri
+    events = (
+        db.query(Event)
+        .filter(Event.category_id.in_(cat_ids))
+        .order_by(Event.date.desc())
+        .all()
+    )
+    if not events:
+        st.info("Nessun evento disponibile per i report.")
+        return
+
+    cat_map = {c.id: c for c in categories}
+    options = {
+        f"{ev.date} · {ev.title} ({cat_map.get(ev.category_id).name})": ev.id
+        for ev in events
+    }
+    label = st.selectbox("Evento", list(options.keys()))
+    event_id = options[label]
+    event = next(e for e in events if e.id == event_id)
+
+    st.markdown(f"### {event.date} · {event.title}")
+
+    # ----- REPORT GENERALE SQUADRA -----
+    team_rep = (
+        db.query(TeamReport)
+        .filter(
+            TeamReport.event_id == event.id,
+            TeamReport.coach_id == user.id,
+        )
+        .first()
+    )
+
+    default_content = team_rep.content if team_rep else ""
+    content = st.text_area(
+        "Report generale (visibile a tutti i genitori della categoria)",
+        value=default_content,
+        height=150,
+        key=f"teamrep_{event.id}",
+    )
+
+    if st.button("Salva report generale", key=f"save_teamrep_{event.id}"):
+        if team_rep is None:
+            team_rep = TeamReport(
+                event_id=event.id,
+                coach_id=user.id,
+                content=content.strip(),
+            )
+            db.add(team_rep)
+        else:
+            team_rep.content = content.strip()
+            team_rep.created_at = datetime.utcnow()
+        db.commit()
+        st.success("Report generale salvato.")
+
+    st.markdown("---")
+    st.markdown("### Report personali per atleta")
+
+    rows = (
+        db.query(EventAttendance, Athlete)
+        .join(Athlete, EventAttendance.athlete_id == Athlete.id)
+        .filter(EventAttendance.event_id == event.id)
+        .order_by(Athlete.name.asc())
+        .all()
+    )
+
+    if not rows:
+        st.info("Nessun atleta per questo evento.")
+        return
+
+    for att, athlete in rows:
+        st.markdown(f"**{athlete.name}**")
+
+        a_rep = (
+            db.query(AthleteReport)
+            .filter(
+                AthleteReport.event_id == event.id,
+                AthleteReport.athlete_id == athlete.id,
+                AthleteReport.coach_id == user.id,
+            )
+            .first()
+        )
+
+        default_note = a_rep.content if a_rep else ""
+        note = st.text_area(
+            "Nota personale (visibile solo al genitore di questo atleta)",
+            value=default_note,
+            height=80,
+            key=f"arep_{event.id}_{athlete.id}",
+        )
+
+        if st.button("Salva nota", key=f"save_arep_{event.id}_{athlete.id}"):
+            if a_rep is None:
+                a_rep = AthleteReport(
+                    event_id=event.id,
+                    athlete_id=athlete.id,
+                    coach_id=user.id,
+                    content=note.strip(),
+                )
+                db.add(a_rep)
+            else:
+                a_rep.content = note.strip()
+                a_rep.created_at = datetime.utcnow()
+            db.commit()
+            st.success(f"Nota salvata per {athlete.name}.")
+
+        st.markdown("---")
