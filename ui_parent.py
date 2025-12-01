@@ -2,9 +2,18 @@
 from datetime import date, datetime
 
 import streamlit as st
+from sqlalchemy import or_, and_
 from sqlalchemy.orm import Session
 
-from .models import Category, Athlete, ParentAthlete, Event, EventAttendance, User
+from .models import (
+    Category,
+    Athlete,
+    ParentAthlete,
+    Event,
+    EventAttendance,
+    Message,
+    User,
+)
 
 
 def render_parent_dashboard(db: Session, user: User) -> None:
@@ -26,6 +35,19 @@ def render_parent_dashboard(db: Session, user: User) -> None:
     st.write(", ".join(a.name for a in athletes))
 
     cat_ids = list({a.category_id for a in athletes if a.category_id})
+
+    tab_eventi, tab_messaggi = st.tabs(["Eventi", "Messaggi"])
+
+    with tab_eventi:
+        _render_events_view(db, user, athletes, cat_ids)
+
+    with tab_messaggi:
+        _render_messages_view(db, user, athletes, athlete_ids, cat_ids)
+
+
+# ---------- EVENTI + PRESENZE ----------
+
+def _render_events_view(db: Session, user: User, athletes, cat_ids):
     today = date.today()
     events = (
         db.query(Event)
@@ -152,3 +174,57 @@ def render_parent_dashboard(db: Session, user: User) -> None:
                     st.success("Dati aggiornati per questo atleta.")
 
             st.markdown("---")
+
+
+# ---------- MESSAGGI (INBOX GENITORI) ----------
+
+def _render_messages_view(
+    db: Session,
+    user: User,
+    athletes,
+    athlete_ids,
+    cat_ids,
+):
+    st.subheader("Messaggi dagli allenatori")
+
+    categories = db.query(Category).filter(Category.id.in_(cat_ids)).all()
+    cat_map = {c.id: c for c in categories}
+    athlete_map = {a.id: a for a in athletes}
+
+    # messaggi visibili al genitore:
+    # - generali (nessuna categoria/atleta)
+    # - della categoria di uno dei figli
+    # - personali per uno dei figli
+    msgs = (
+        db.query(Message)
+        .filter(
+            or_(
+                and_(Message.category_id.is_(None), Message.athlete_id.is_(None)),
+                Message.category_id.in_(cat_ids),
+                Message.athlete_id.in_(athlete_ids),
+            )
+        )
+        .order_by(Message.created_at.desc())
+        .limit(50)
+        .all()
+    )
+
+    if not msgs:
+        st.info("Non hai ancora messaggi.")
+        return
+
+    for msg in msgs:
+        # etichetta destinatari
+        if msg.athlete_id:
+            ath = athlete_map.get(msg.athlete_id)
+            target = f"Personale per {ath.name if ath else msg.athlete_id}"
+        elif msg.category_id:
+            cat = cat_map.get(msg.category_id)
+            target = f"Categoria: {cat.name if cat else msg.category_id}"
+        else:
+            target = "Tutto il club"
+
+        st.markdown(f"**{msg.title}**")
+        st.caption(f"{target} · {msg.created_at.strftime('%d/%m/%Y %H:%M')}")
+        st.write(msg.content)
+        st.markdown("---")
