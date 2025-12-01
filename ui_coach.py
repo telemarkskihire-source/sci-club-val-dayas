@@ -4,7 +4,15 @@ from datetime import date
 import streamlit as st
 from sqlalchemy.orm import Session
 
-from .models import Category, Athlete, CoachCategory, Event, EventAttendance, User
+from .models import (
+    Category,
+    Athlete,
+    CoachCategory,
+    Event,
+    EventAttendance,
+    Message,
+    User,
+)
 
 
 def render_coach_dashboard(db: Session, user: User) -> None:
@@ -34,6 +42,19 @@ def render_coach_dashboard(db: Session, user: User) -> None:
         .all()
     )
 
+    tab_eventi, tab_messaggi = st.tabs(["Eventi", "Comunicazioni"])
+
+    with tab_eventi:
+        _render_events_view(db, user, events, cat_map)
+
+    with tab_messaggi:
+        _render_messages_view(db, user, categories, cat_ids)
+
+
+# ---------- EVENTI ----------
+
+
+def _render_events_view(db: Session, user: User, events, cat_map):
     st.subheader("Prossimi eventi delle tue categorie")
     if not events:
         st.info("Nessun evento futuro per le tue categorie.")
@@ -64,54 +85,165 @@ def render_coach_dashboard(db: Session, user: User) -> None:
 
             if not rows:
                 st.info("Nessun atleta collegato a questo evento.")
-            else:
-                present = sum(1 for a, _ in rows if a.status == "present")
-                absent = sum(1 for a, _ in rows if a.status == "absent")
-                undecided = sum(1 for a, _ in rows if a.status == "undecided")
+                continue
 
-                skis_count = sum(1 for a, _ in rows if a.skis_in_skiroom)
-                car_drivers = sum(1 for a, _ in rows if a.car_available)
-                total_car_seats = sum((a.car_seats or 0) for a, _ in rows)
+            present = sum(1 for a, _ in rows if a.status == "present")
+            absent = sum(1 for a, _ in rows if a.status == "absent")
+            undecided = sum(1 for a, _ in rows if a.status == "undecided")
 
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("Presenze previste", present)
-                col2.metric("Assenti", absent)
-                col3.metric("Da confermare", undecided)
-                col4.metric("Sci in ski-room", skis_count)
+            skis_count = sum(1 for a, _ in rows if a.skis_in_skiroom)
+            car_drivers = sum(1 for a, _ in rows if a.car_available)
+            total_car_seats = sum((a.car_seats or 0) for a, _ in rows)
 
-                col5, col6 = st.columns(2)
-                col5.metric("Automuniti", car_drivers)
-                col6.metric("Posti auto totali", total_car_seats)
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Presenze previste", present)
+            col2.metric("Assenti", absent)
+            col3.metric("Da confermare", undeciced := undecided)
+            col4.metric("Sci in ski-room", skis_count)
 
-                st.markdown("----")
-                st.markdown("**Dettaglio atleti:**")
+            col5, col6 = st.columns(2)
+            col5.metric("Automuniti", car_drivers)
+            col6.metric("Posti auto totali", total_car_seats)
 
-                table_data = []
-                for att, athlete in rows:
-                    status_icon = {
-                        "present": "✅ Presente",
-                        "absent": "❌ Assente",
-                        "undecided": "❓ Da confermare",
-                    }.get(att.status, att.status)
+            st.markdown("----")
+            st.markdown("**Dettaglio atleti:**")
 
-                    skis_label = "🎿 Sì" if att.skis_in_skiroom else "—"
-                    if att.car_available and is_race:
-                        car_label = f"🚗 Sì ({att.car_seats or 0} posti)"
-                    elif is_race:
-                        car_label = "—"
-                    else:
-                        car_label = "N/A"
+            table_data = []
+            for att, athlete in rows:
+                status_icon = {
+                    "present": "✅ Presente",
+                    "absent": "❌ Assente",
+                    "undecided": "❓ Da confermare",
+                }.get(att.status, att.status)
 
-                    table_data.append(
-                        {
-                            "Atleta": athlete.name,
-                            "Stato": status_icon,
-                            "Sci in ski-room": skis_label,
-                            "Auto": car_label,
-                        }
-                    )
+                skis_label = "🎿 Sì" if att.skis_in_skiroom else "—"
+                if att.car_available and is_race:
+                    car_label = f"🚗 Sì ({att.car_seats or 0} posti)"
+                elif is_race:
+                    car_label = "—"
+                else:
+                    car_label = "N/A"
 
-                st.table(table_data)
-                st.markdown(
-                    "_Nota: in questa versione l'allenatore vede ma non modifica; le modifiche vengono dal genitore._"
+                table_data.append(
+                    {
+                        "Atleta": athlete.name,
+                        "Stato": status_icon,
+                        "Sci in ski-room": skis_label,
+                        "Auto": car_label,
+                    }
                 )
+
+            st.table(table_data)
+            st.markdown(
+                "_Nota: in questa versione l'allenatore vede ma non modifica; le modifiche vengono dal genitore._"
+            )
+
+
+# ---------- MESSAGGI ----------
+
+
+def _render_messages_view(
+    db: Session,
+    user: User,
+    categories: list[Category],
+    cat_ids: list[str],
+) -> None:
+    st.subheader("Comunicazioni con i genitori")
+
+    tab_nuovo, tab_storico = st.tabs(["Nuovo messaggio", "Storico inviati"])
+
+    # --- Nuovo messaggio ---
+    with tab_nuovo:
+        _render_new_message_form(db, user, categories, cat_ids)
+
+    # --- Storico ---
+    with tab_storico:
+        msgs = (
+            db.query(Message)
+            .filter(Message.sender_id == user.id)
+            .order_by(Message.created_at.desc())
+            .limit(50)
+            .all()
+        )
+        if not msgs:
+            st.info("Non hai ancora inviato messaggi.")
+        else:
+            for msg in msgs:
+                target = "Tutto il club"
+                if msg.athlete_id:
+                    target = f"Personale (atleta id {msg.athlete_id})"
+                elif msg.category_id:
+                    cat = next((c for c in categories if c.id == msg.category_id), None)
+                    target = f"Categoria: {cat.name if cat else msg.category_id}"
+
+                st.markdown(f"**{msg.title}**")
+                st.caption(f"Destinatari: {target} · Inviato il {msg.created_at.date()}")
+                st.write(msg.content)
+                st.markdown("---")
+
+
+def _render_new_message_form(
+    db: Session,
+    user: User,
+    categories: list[Category],
+    cat_ids: list[str],
+) -> None:
+    st.markdown("Invia una comunicazione ai genitori.")
+
+    # recupera atleti delle categorie del coach
+    athletes = (
+        db.query(Athlete)
+        .filter(Athlete.category_id.in_(cat_ids))
+        .order_by(Athlete.name.asc())
+        .all()
+    )
+
+    audience_type = st.radio(
+        "Destinatari",
+        options=[
+            "Tutto il club",
+            "Categoria",
+            "Genitore di atleta",
+        ],
+        horizontal=False,
+    )
+
+    selected_category_id = None
+    selected_athlete_id = None
+
+    if audience_type == "Categoria":
+        if not categories:
+            st.warning("Non hai categorie associate.")
+            return
+        cat_label_map = {f"{c.name}": c.id for c in categories}
+        label = st.selectbox("Categoria", list(cat_label_map.keys()))
+        selected_category_id = cat_label_map[label]
+
+    elif audience_type == "Genitore di atleta":
+        if not athletes:
+            st.warning("Nessun atleta collegato alle tue categorie.")
+            return
+        ath_label_map = {f"{a.name} ({a.id[:6]})": a.id for a in athletes}
+        label = st.selectbox("Atleta", list(ath_label_map.keys()))
+        selected_athlete_id = ath_label_map[label]
+
+    with st.form("new_message"):
+        title = st.text_input("Titolo", "")
+        content = st.text_area("Contenuto", "", height=150)
+        submitted = st.form_submit_button("Invia messaggio")
+
+    if submitted:
+        if not title.strip() or not content.strip():
+            st.error("Titolo e contenuto sono obbligatori.")
+            return
+
+        msg = Message(
+            sender_id=user.id,
+            category_id=selected_category_id,
+            athlete_id=selected_athlete_id,
+            title=title.strip(),
+            content=content.strip(),
+        )
+        db.add(msg)
+        db.commit()
+        st.success("Messaggio inviato.")
