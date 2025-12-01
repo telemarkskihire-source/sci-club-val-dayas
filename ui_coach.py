@@ -1,10 +1,10 @@
-# core/ui_coach.py
+# ui_coach.py
 from datetime import date
 
 import streamlit as st
 from sqlalchemy.orm import Session
 
-from .models import (
+from core.models import (
     Category,
     Athlete,
     CoachCategory,
@@ -42,7 +42,6 @@ def render_coach_dashboard(db: Session, user: User) -> None:
         .all()
     )
 
-    # -------- TABS: EVENTI | COMUNICAZIONI --------
     tab_eventi, tab_messaggi = st.tabs(["Eventi", "Comunicazioni"])
 
     with tab_eventi:
@@ -174,7 +173,9 @@ def _render_messages_view(
                     target = f"Categoria: {cat.name if cat else msg.category_id}"
 
                 st.markdown(f"**{msg.title}**")
-                st.caption(f"Destinatari: {target} · Inviato il {msg.created_at.date()}")
+                st.caption(
+                    f"Destinatari: {target} · Inviato il {msg.created_at.strftime('%d/%m/%Y %H:%M')}"
+                )
                 st.write(msg.content)
                 st.markdown("---")
 
@@ -196,11 +197,7 @@ def _render_new_message_form(
 
     audience_type = st.radio(
         "Destinatari",
-        options=[
-            "Tutto il club",
-            "Categoria",
-            "Genitore di atleta",
-        ],
+        options=["Tutto il club", "Categoria", "Genitore di atleta"],
         horizontal=False,
     )
 
@@ -211,7 +208,7 @@ def _render_new_message_form(
         if not categories:
             st.warning("Non hai categorie associate.")
             return
-        cat_label_map = {f"{c.name}": c.id for c in categories}
+        cat_label_map = {c.name: c.id for c in categories}
         label = st.selectbox("Categoria", list(cat_label_map.keys()))
         selected_category_id = cat_label_map[label]
 
