@@ -1,7 +1,9 @@
 # ui_parent.py
 from datetime import date, datetime
+
 import streamlit as st
 from sqlalchemy.orm import Session
+
 from core.models import (
     User,
     Category,
@@ -11,10 +13,9 @@ from core.models import (
     EventAttendance,
     Message,
     AthleteReport,
+    DeviceToken,
 )
 
-
-# ---------- LABELS ----------
 status_label_map = {
     "undecided": "Da confermare",
     "present": "Presente",
@@ -23,7 +24,6 @@ status_label_map = {
 reverse_status_map = {v: k for k, v in status_label_map.items()}
 
 
-# ---------- ENTRYPOINT ----------
 def render_parent_dashboard(db: Session, user: User):
     st.header("Pannello Genitore")
 
@@ -38,28 +38,31 @@ def render_parent_dashboard(db: Session, user: User):
 
     athlete_ids = [l.athlete_id for l in links]
     athletes = db.query(Athlete).filter(Athlete.id.in_(athlete_ids)).all()
-    athlete_map = {a.id: a for a in athletes}
 
     st.subheader("I tuoi atleti")
     st.write(", ".join(a.name for a in athletes))
 
     cat_ids = list({a.category_id for a in athletes if a.category_id})
 
-    events_tab, messages_tab, reports_tab = st.tabs(
-        ["Eventi", "Messaggi", "Report"]
+    tab_eventi, tab_messaggi, tab_report, tab_settings = st.tabs(
+        ["Eventi", "Messaggi", "Report", "Impostazioni"]
     )
 
-    with events_tab:
+    with tab_eventi:
         _render_events_view(db, user, athletes, cat_ids)
 
-    with messages_tab:
-        _render_messages_view(db, user)
+    with tab_messaggi:
+        _render_messages_view(db, user, athletes, athlete_ids, cat_ids)
 
-    with reports_tab:
-        _render_reports_view(db, user, athletes)
+    with tab_report:
+        _render_reports_view(db, user, athletes, athlete_ids, cat_ids)
+
+    with tab_settings:
+        _render_settings_view(db, user)
 
 
-# ---------- EVENTI ----------
+# ---------- EVENTI + PRESENZE ----------
+
 def _render_events_view(db: Session, user: User, athletes, cat_ids):
     today = date.today()
     events = (
@@ -189,46 +192,160 @@ def _render_events_view(db: Session, user: User, athletes, cat_ids):
 
 
 # ---------- MESSAGGI ----------
-def _render_messages_view(db: Session, user: User):
-    st.subheader("Messaggi ricevuti")
+
+def _render_messages_view(
+    db: Session,
+    user: User,
+    athletes,
+    athlete_ids,
+    cat_ids,
+):
+    st.subheader("Messaggi dagli allenatori")
+
+    categories = db.query(Category).filter(Category.id.in_(cat_ids)).all()
+    cat_map = {c.id: c for c in categories}
+    athlete_map = {a.id: a for a in athletes}
 
     msgs = (
         db.query(Message)
-        .filter((Message.athlete_id != None) | (Message.category_id != None))
         .order_by(Message.created_at.desc())
+        .limit(50)
         .all()
     )
 
-    if not msgs:
-        st.info("Nessun messaggio.")
+    # filtro: solo quelli che riguardano te
+    filtered = []
+    for msg in msgs:
+        if msg.athlete_id and msg.athlete_id in athlete_ids:
+            filtered.append(msg)
+        elif msg.category_id and msg.category_id in cat_ids:
+            filtered.append(msg)
+        elif not msg.athlete_id and not msg.category_id:
+            # broadcast a tutto il club
+            filtered.append(msg)
+
+    if not filtered:
+        st.info("Non hai ancora messaggi.")
         return
 
-    for msg in msgs:
-        st.markdown(f"### {msg.title}")
-        st.caption(f"{msg.created_at} — da {msg.sender.name}")
+    for msg in filtered:
+        if msg.athlete_id:
+            ath = athlete_map.get(msg.athlete_id)
+            target = f"Personale per {ath.name if ath else msg.athlete_id}"
+        elif msg.category_id:
+            cat = cat_map.get(msg.category_id)
+            target = f"Categoria: {cat.name if cat else msg.category_id}"
+        else:
+            target = "Tutto il club"
+
+        st.markdown(f"**{msg.title}**")
+        st.caption(f"{target} · {msg.created_at.strftime('%d/%m/%Y %H:%M')}")
         st.write(msg.content)
         st.markdown("---")
 
 
-# ---------- REPORT ----------
-def _render_reports_view(db: Session, user: User, athletes):
-    st.subheader("Report personali dei tuoi atleti")
+# ---------- REPORT (GENITORE) ----------
 
-    athlete_ids = [a.id for a in athletes]
+def _render_reports_view(
+    db: Session,
+    user: User,
+    athletes,
+    athlete_ids,
+    cat_ids,
+):
+    st.subheader("Report allenamenti / gare")
 
-    reports = (
-        db.query(AthleteReport)
-        .filter(AthleteReport.athlete_id.in_(athlete_ids))
-        .order_by(AthleteReport.created_at.desc())
+    categories = db.query(Category).filter(Category.id.in_(cat_ids)).all()
+    cat_map = {c.id: c for c in categories}
+    athlete_map = {a.id: a for a in athletes}
+
+    events = (
+        db.query(Event)
+        .filter(Event.category_id.in_(cat_ids))
+        .order_by(Event.date.desc())
         .all()
     )
 
-    if not reports:
-        st.info("Ancora nessun report.")
+    if not events:
+        st.info("Nessun evento con report.")
         return
 
-    for rep in reports:
-        st.markdown(f"### {rep.athlete.name} — {rep.event.date} — {rep.event.title}")
-        st.caption(f"Allenatore: {rep.coach.name} — {rep.created_at}")
-        st.write(rep.content or "_Nessun testo_")
-        st.markdown("---")
+    any_report = False
+
+    for ev in events:
+        athlete_reports = (
+            db.query(AthleteReport)
+            .filter(
+                AthleteReport.event_id == ev.id,
+                AthleteReport.athlete_id.in_(athlete_ids),
+            )
+            .order_by(AthleteReport.created_at.desc())
+            .all()
+        )
+
+        if not athlete_reports:
+            continue
+
+        any_report = True
+        cat = cat_map.get(ev.category_id)
+        with st.expander(
+            f"{ev.date} · {ev.title} ({cat.name if cat else '-'})",
+            expanded=False,
+        ):
+            st.markdown("### Report personali")
+            for rep in athlete_reports:
+                ath = athlete_map.get(rep.athlete_id)
+                st.markdown(f"**Per {ath.name if ath else rep.athlete_id}**")
+                st.caption(
+                    f"Inserito il {rep.created_at.strftime('%d/%m/%Y %H:%M')} "
+                    f"da {rep.coach.name}"
+                )
+                st.write(rep.content or "—")
+                st.markdown("---")
+
+    if not any_report:
+        st.info("Non ci sono ancora report per i tuoi figli.")
+
+
+# ---------- IMPOSTAZIONI (FCM TOKEN) ----------
+
+def _render_settings_view(db: Session, user: User):
+    st.subheader("Impostazioni notifiche")
+
+    st.markdown(
+        "Per ricevere notifiche push sul tuo telefono o browser, "
+        "incolla qui il tuo **Firebase device token**."
+    )
+
+    existing = (
+        db.query(DeviceToken)
+        .filter(DeviceToken.user_id == user.id)
+        .order_by(DeviceToken.created_at.desc())
+        .first()
+    )
+    default_token = existing.token if existing else ""
+
+    with st.form("fcm_token_form_parent"):
+        token = st.text_input("FCM device token", value=default_token)
+        submitted = st.form_submit_button("Salva token")
+
+    if submitted:
+        token = token.strip()
+        if not token:
+            st.error("Il token non può essere vuoto.")
+            return
+
+        row = (
+            db.query(DeviceToken)
+            .filter(DeviceToken.user_id == user.id)
+            .first()
+        )
+        if row:
+            row.token = token
+            row.last_used_at = datetime.utcnow()
+        else:
+            row = DeviceToken(user_id=user.id, platform="web", token=token)
+            db.add(row)
+
+        db.commit()
+        st.success("Token salvato. Ora puoi ricevere notifiche push.")
