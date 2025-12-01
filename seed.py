@@ -1,9 +1,10 @@
-# core/seed.py
+# seed.py
 from datetime import date, timedelta
+
 from sqlalchemy.orm import Session
 
-from .db import Base, engine, SessionLocal
-from .models import (
+from core.db import Base, engine, SessionLocal
+from core.models import (
     User,
     Category,
     Athlete,
