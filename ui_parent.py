@@ -1,11 +1,11 @@
-# core/ui_parent.py
+# ui_parent.py
 from datetime import date, datetime
 
 import streamlit as st
 from sqlalchemy import or_, and_
 from sqlalchemy.orm import Session
 
-from .models import (
+from core.models import (
     Category,
     Athlete,
     ParentAthlete,
@@ -14,6 +14,13 @@ from .models import (
     Message,
     User,
 )
+
+status_label_map = {
+    "undecided": "Da confermare",
+    "present": "Presente",
+    "absent": "Assente",
+}
+reverse_status_map = {v: k for k, v in status_label_map.items()}
 
 
 def render_parent_dashboard(db: Session, user: User) -> None:
@@ -30,11 +37,10 @@ def render_parent_dashboard(db: Session, user: User) -> None:
 
     athlete_ids = [l.athlete_id for l in links]
     athletes = db.query(Athlete).filter(Athlete.id.in_(athlete_ids)).all()
+    cat_ids = list({a.category_id for a in athletes if a.category_id})
 
     st.subheader("I tuoi atleti")
     st.write(", ".join(a.name for a in athletes))
-
-    cat_ids = list({a.category_id for a in athletes if a.category_id})
 
     tab_eventi, tab_messaggi = st.tabs(["Eventi", "Messaggi"])
 
@@ -65,13 +71,6 @@ def _render_events_view(db: Session, user: User, athletes, cat_ids):
 
     categories = db.query(Category).filter(Category.id.in_(cat_ids)).all()
     cat_map = {c.id: c for c in categories}
-
-    status_label_map = {
-        "undecided": "Da confermare",
-        "present": "Presente",
-        "absent": "Assente",
-    }
-    reverse_status_map = {v: k for k, v in status_label_map.items()}
 
     for ev in events:
         cat = cat_map.get(ev.category_id)
@@ -191,10 +190,6 @@ def _render_messages_view(
     cat_map = {c.id: c for c in categories}
     athlete_map = {a.id: a for a in athletes}
 
-    # messaggi visibili al genitore:
-    # - generali (nessuna categoria/atleta)
-    # - della categoria di uno dei figli
-    # - personali per uno dei figli
     msgs = (
         db.query(Message)
         .filter(
@@ -214,7 +209,6 @@ def _render_messages_view(
         return
 
     for msg in msgs:
-        # etichetta destinatari
         if msg.athlete_id:
             ath = athlete_map.get(msg.athlete_id)
             target = f"Personale per {ath.name if ath else msg.athlete_id}"
