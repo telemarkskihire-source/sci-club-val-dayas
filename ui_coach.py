@@ -60,6 +60,7 @@ def render_coach_dashboard(db: Session, user: User) -> None:
 
 # ---------- EVENTI ----------
 
+
 def _render_events_view(db: Session, events, cat_map):
     st.subheader("Prossimi eventi delle tue categorie")
     if not events:
@@ -81,6 +82,34 @@ def _render_events_view(db: Session, events, cat_map):
             if ev.location:
                 st.caption(f"Località: {ev.location}")
 
+            # --- Impostazioni logistiche decise dal coach ---
+            st.markdown("**Richieste logistiche**")
+            ask_skiroom = st.checkbox(
+                "Chiedi di lasciare gli sci in ski-room",
+                value=ev.ask_skiroom,
+                key=f"ask_ski_{ev.id}",
+            )
+
+            ask_carpool = ev.ask_carpool
+            if is_race:
+                ask_carpool = st.checkbox(
+                    "Chiedi disponibilità auto (carpool per la gara)",
+                    value=ev.ask_carpool,
+                    key=f"ask_car_{ev.id}",
+                )
+
+            if st.button("Salva richieste", key=f"save_req_{ev.id}"):
+                ev.ask_skiroom = ask_skiroom
+                if is_race:
+                    ev.ask_carpool = ask_carpool
+                else:
+                    ev.ask_carpool = False
+                db.commit()
+                st.success("Impostazioni logistiche aggiornate.")
+
+            st.markdown("---")
+
+            # --- Presenze & riepilogo ---
             rows = (
                 db.query(EventAttendance, Athlete)
                 .join(Athlete, EventAttendance.athlete_id == Athlete.id)
@@ -105,11 +134,15 @@ def _render_events_view(db: Session, events, cat_map):
             col1.metric("Presenze previste", present)
             col2.metric("Assenti", absent)
             col3.metric("Da confermare", undecided)
-            col4.metric("Sci in ski-room", skis_count)
+            if ev.ask_skiroom:
+                col4.metric("Sci in ski-room", skis_count)
+            else:
+                col4.metric("Sci in ski-room", "-")
 
-            col5, col6 = st.columns(2)
-            col5.metric("Automuniti", car_drivers)
-            col6.metric("Posti auto totali", total_car_seats)
+            if is_race and ev.ask_carpool:
+                col5, col6 = st.columns(2)
+                col5.metric("Automuniti", car_drivers)
+                col6.metric("Posti auto totali", total_car_seats)
 
             st.markdown("----")
             st.markdown("**Dettaglio atleti:**")
@@ -123,10 +156,11 @@ def _render_events_view(db: Session, events, cat_map):
                 }.get(att.status, att.status)
 
                 skis_label = "🎿 Sì" if att.skis_in_skiroom else "—"
-                if att.car_available and is_race:
-                    car_label = f"🚗 Sì ({att.car_seats or 0} posti)"
-                elif is_race:
-                    car_label = "—"
+                if is_race and ev.ask_carpool:
+                    if att.car_available:
+                        car_label = f"🚗 Sì ({att.car_seats or 0} posti)"
+                    else:
+                        car_label = "—"
                 else:
                     car_label = "N/A"
 
@@ -134,15 +168,16 @@ def _render_events_view(db: Session, events, cat_map):
                     {
                         "Atleta": athlete.name,
                         "Stato": status_icon,
-                        "Sci in ski-room": skis_label,
+                        "Sci in ski-room": skis_label if ev.ask_skiroom else "N/A",
                         "Auto": car_label,
                     }
                 )
 
             st.table(table_data)
             st.markdown(
-                "_Nota: in questa versione l'allenatore vede ma non modifica; le modifiche vengono dal genitore._"
+                "_Nota: in questa versione l'allenatore vede ma non modifica le presenze; le modifiche vengono dal genitore._"
             )
+
 
 
 # ---------- MESSAGGI ----------
