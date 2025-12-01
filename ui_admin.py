@@ -1,10 +1,10 @@
-# core/ui_admin.py
+# ui_admin.py
 from datetime import date
 
 import streamlit as st
 from sqlalchemy.orm import Session
 
-from .models import User, Category, Athlete, Event
+from core.models import User, Category, Athlete, Event
 
 
 def render_admin_dashboard(db: Session, user: User) -> None:
