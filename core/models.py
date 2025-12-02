@@ -1,4 +1,6 @@
 # core/models.py
+# Modelli SQLAlchemy per Sci Club Val d'Ayas
+
 from datetime import datetime, date
 
 from sqlalchemy import (
@@ -24,6 +26,7 @@ class User(Base):
     email = Column(String(200), nullable=True, unique=True)
     role = Column(String(50), nullable=False)  # "admin", "coach", "parent"
 
+    # relazioni
     coached_categories = relationship("CoachCategory", back_populates="coach")
     parent_links = relationship("ParentAthlete", back_populates="parent")
     sent_messages = relationship("Message", back_populates="sender")
@@ -83,7 +86,10 @@ class Event(Base):
     __tablename__ = "events"
 
     id = Column(Integer, primary_key=True, index=True)
-    type = Column(String(50), nullable=False)  # "training" / "race"
+
+    # "training" / "race"
+    type = Column(String(50), nullable=False)
+
     category_id = Column(Integer, ForeignKey("categories.id"), nullable=False)
     title = Column(String(200), nullable=False)
     description = Column(Text, nullable=True)
@@ -107,13 +113,20 @@ class EventAttendance(Base):
     event_id = Column(Integer, ForeignKey("events.id"), nullable=False)
     athlete_id = Column(Integer, ForeignKey("athletes.id"), nullable=False)
 
+    # "undecided" / "present" / "absent"
     status = Column(String(20), nullable=False, default="undecided")
+
+    # logistica legata alla richiesta del coach
     skis_in_skiroom = Column(Boolean, default=False)
     car_available = Column(Boolean, default=False)
     car_seats = Column(Integer, nullable=True)
 
     updated_by = Column(Integer, ForeignKey("users.id"), nullable=True)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(
+        DateTime,
+        default=datetime.utcnow,
+        nullable=False,
+    )
 
     event = relationship("Event", back_populates="attendances")
     athlete = relationship("Athlete", back_populates="attendances")
@@ -125,6 +138,7 @@ class Message(Base):
     id = Column(Integer, primary_key=True, index=True)
     sender_id = Column(Integer, ForeignKey("users.id"), nullable=False)
 
+    # broadcast per categoria o personale per atleta
     category_id = Column(Integer, ForeignKey("categories.id"), nullable=True)
     athlete_id = Column(Integer, ForeignKey("athletes.id"), nullable=True)
 
