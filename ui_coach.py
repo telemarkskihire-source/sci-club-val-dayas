@@ -1,5 +1,8 @@
 # ui_coach.py
-from datetime import date, datetime
+# Pannello Allenatore – Sci Club Val d'Ayas
+
+from datetime import date
+from typing import List, Set
 
 import streamlit as st
 from sqlalchemy.orm import Session
@@ -8,69 +11,92 @@ from core.models import (
     User,
     Category,
     Athlete,
-    CoachCategory,
+    ParentAthlete,
     Event,
     EventAttendance,
     Message,
-    TeamReport,
-    AthleteReport,
     DeviceToken,
 )
-from notifications import (
-    notify_message_created,
-    notify_logistics_changed,
-    notify_team_report,
-    notify_athlete_report,
-)
+from core.notifications import send_push_to_tokens
 
 
-def render_coach_dashboard(db: Session, user: User) -> None:
-    st.header("Pannello Allenatore")
+# --------- UTILS ----------
 
-    coach_cats = (
-        db.query(CoachCategory)
-        .filter(CoachCategory.coach_id == user.id)
-        .all()
-    )
-    if not coach_cats:
-        st.info("Non sei assegnato a nessuna categoria.")
-        return
 
-    cat_ids = [c.category_id for c in coach_cats]
+def _get_coach_categories(db: Session, user: User):
+    links = db.query(Category).join(
+        "events", isouter=True
+    )  # solo per tenerle "vive"
+    # ma in realtà abbiamo già la relazione in CoachCategory, quindi:
+    coach_links = [c for c in user.coached_categories]
+    cat_ids = [cl.category_id for cl in coach_links]
+    if not cat_ids:
+        return [], []
+
     categories = db.query(Category).filter(Category.id.in_(cat_ids)).all()
     cat_map = {c.id: c for c in categories}
+    return categories, cat_ids, cat_map
 
-    st.subheader("Categorie seguite")
-    st.write(", ".join(c.name for c in categories))
 
+def _load_future_events_for_cats(db: Session, cat_ids: List[int]):
     today = date.today()
-    events = (
+    return (
         db.query(Event)
         .filter(Event.category_id.in_(cat_ids), Event.date >= today)
         .order_by(Event.date.asc())
         .all()
     )
 
-    tab_eventi, tab_messaggi, tab_report, tab_settings = st.tabs(
-        ["Eventi", "Comunicazioni", "Report", "Impostazioni"]
+
+def _collect_parent_ids_for_category(db: Session, category_id: int) -> Set[int]:
+    athletes = db.query(Athlete).filter(Athlete.category_id == category_id).all()
+    if not athletes:
+        return set()
+
+    ath_ids = [a.id for a in athletes]
+    links = (
+        db.query(ParentAthlete)
+        .filter(ParentAthlete.athlete_id.in_(ath_ids))
+        .all()
     )
-
-    with tab_eventi:
-        _render_events_view(db, events, cat_map)
-
-    with tab_messaggi:
-        _render_messages_view(db, user, categories, cat_ids)
-
-    with tab_report:
-        _render_reports_view(db, user, categories, cat_ids)
-
-    with tab_settings:
-        _render_settings_view(db, user)
+    return {l.parent_id for l in links}
 
 
-# ---------- EVENTI ----------
+def _collect_parent_ids_for_athlete(db: Session, athlete_id: int) -> Set[int]:
+    links = (
+        db.query(ParentAthlete)
+        .filter(ParentAthlete.athlete_id == athlete_id)
+        .all()
+    )
+    return {l.parent_id for l in links}
 
-def _render_events_view(db: Session, events, cat_map):
+
+def _get_tokens_for_users(db: Session, user_ids: List[int]) -> List[str]:
+    if not user_ids:
+        return []
+    tokens = (
+        db.query(DeviceToken)
+        .filter(DeviceToken.user_id.in_(user_ids))
+        .all()
+    )
+    return [t.token for t in tokens]
+
+
+# --------- TAB EVENTI ----------
+
+
+def _render_events_tab(db: Session, user: User):
+    categories, cat_ids, cat_map = _get_coach_categories(db, user)
+
+    if not categories:
+        st.info("Non sei assegnato a nessuna categoria.")
+        return
+
+    st.subheader("Categorie seguite")
+    st.write(", ".join(c.name for c in categories))
+
+    events = _load_future_events_for_cats(db, cat_ids)
+
     st.subheader("Prossimi eventi delle tue categorie")
     if not events:
         st.info("Nessun evento futuro per le tue categorie.")
@@ -91,35 +117,6 @@ def _render_events_view(db: Session, events, cat_map):
             if ev.location:
                 st.caption(f"Località: {ev.location}")
 
-            # --- impostazioni logistiche ---
-            st.markdown("**Richieste logistiche verso i genitori**")
-            ask_skiroom = st.checkbox(
-                "Chiedi di lasciare gli sci in ski-room",
-                value=ev.ask_skiroom,
-                key=f"ask_ski_{ev.id}",
-            )
-
-            ask_carpool = ev.ask_carpool
-            if is_race:
-                ask_carpool = st.checkbox(
-                    "Chiedi disponibilità auto (carpool per la gara)",
-                    value=ev.ask_carpool,
-                    key=f"ask_car_{ev.id}",
-                )
-
-            if st.button("Salva richieste", key=f"save_req_{ev.id}"):
-                ev.ask_skiroom = ask_skiroom
-                if is_race:
-                    ev.ask_carpool = ask_carpool
-                else:
-                    ev.ask_carpool = False
-                db.commit()
-                st.success("Impostazioni logistiche aggiornate.")
-                notify_logistics_changed(db, ev)
-
-            st.markdown("---")
-
-            # --- riepilogo presenze ---
             rows = (
                 db.query(EventAttendance, Athlete)
                 .join(Athlete, EventAttendance.athlete_id == Athlete.id)
@@ -144,12 +141,11 @@ def _render_events_view(db: Session, events, cat_map):
             col1.metric("Presenze previste", present)
             col2.metric("Assenti", absent)
             col3.metric("Da confermare", undecided)
-            col4.metric("Sci in ski-room", skis_count if ev.ask_skiroom else 0)
+            col4.metric("Sci in ski-room", skis_count)
 
-            if is_race and ev.ask_carpool:
-                col5, col6 = st.columns(2)
-                col5.metric("Automuniti", car_drivers)
-                col6.metric("Posti auto totali", total_car_seats)
+            col5, col6 = st.columns(2)
+            col5.metric("Automuniti", car_drivers)
+            col6.metric("Posti auto totali", total_car_seats)
 
             st.markdown("----")
             st.markdown("**Dettaglio atleti:**")
@@ -163,291 +159,141 @@ def _render_events_view(db: Session, events, cat_map):
                 }.get(att.status, att.status)
 
                 skis_label = "🎿 Sì" if att.skis_in_skiroom else "—"
-                if is_race and ev.ask_carpool:
-                    if att.car_available:
-                        car_label = f"🚗 Sì ({att.car_seats or 0} posti)"
-                    else:
-                        car_label = "—"
+                if att.car_available:
+                    car_label = f"🚗 Sì ({att.car_seats or 0} posti)"
                 else:
-                    car_label = "N/A"
+                    car_label = "—"
 
                 table_data.append(
                     {
                         "Atleta": athlete.name,
                         "Stato": status_icon,
-                        "Sci in ski-room": skis_label if ev.ask_skiroom else "N/A",
-                        "Auto": car_label,
+                        "Sci in ski-room": skis_label,
+                        "Auto": car_label if is_race else "N/A" if not is_race else car_label,
                     }
                 )
 
             st.table(table_data)
+
             st.markdown(
-                "_Nota: l'allenatore qui vede i dati inseriti dai genitori._"
+                "_Nota: in questa versione l'allenatore vede ma non modifica; le modifiche vengono dal genitore._"
             )
 
 
-# ---------- MESSAGGI ----------
-
-def _render_messages_view(
-    db: Session,
-    user: User,
-    categories: list[Category],
-    cat_ids: list[int],
-) -> None:
-    st.subheader("Comunicazioni con i genitori")
-
-    tab_nuovo, tab_storico = st.tabs(["Nuovo messaggio", "Storico inviati"])
-
-    with tab_nuovo:
-        _render_new_message_form(db, user, categories, cat_ids)
-
-    with tab_storico:
-        msgs = (
-            db.query(Message)
-            .filter(Message.sender_id == user.id)
-            .order_by(Message.created_at.desc())
-            .limit(50)
-            .all()
-        )
-        if not msgs:
-            st.info("Non hai ancora inviato messaggi.")
-        else:
-            for msg in msgs:
-                if msg.athlete_id:
-                    target = f"Genitori atleta ID {msg.athlete_id}"
-                elif msg.category_id:
-                    cat = next((c for c in categories if c.id == msg.category_id), None)
-                    target = f"Categoria: {cat.name if cat else msg.category_id}"
-                else:
-                    target = "Tutto il club"
-
-                st.markdown(f"**{msg.title}**")
-                st.caption(
-                    f"Destinatari: {target} · Inviato il {msg.created_at.strftime('%d/%m/%Y %H:%M')}"
-                )
-                st.write(msg.content)
-                st.markdown("---")
+# --------- TAB COMUNICAZIONI ----------
 
 
-def _render_new_message_form(
-    db: Session,
-    user: User,
-    categories: list[Category],
-    cat_ids: list[int],
-) -> None:
-    st.markdown("Invia una comunicazione ai genitori.")
+def _render_comunicazioni_tab(db: Session, user: User):
+    st.subheader("Nuova comunicazione ai genitori")
 
-    athletes = (
-        db.query(Athlete)
-        .filter(Athlete.category_id.in_(cat_ids))
-        .order_by(Athlete.name.asc())
-        .all()
-    )
-
-    audience_type = st.radio(
+    mode = st.radio(
         "Destinatari",
-        options=["Tutto il club", "Categoria", "Genitore di atleta"],
+        options=["Tutti i genitori delle mie categorie", "Solo una categoria", "Per atleta"],
         horizontal=False,
     )
 
-    selected_category_id = None
-    selected_athlete_id = None
+    categories, cat_ids, _ = _get_coach_categories(db, user)
 
-    if audience_type == "Categoria":
-        cat_label_map = {c.name: c.id for c in categories}
-        label = st.selectbox("Categoria", list(cat_label_map.keys()))
-        selected_category_id = cat_label_map[label]
+    target_category_id = None
+    target_athlete_id = None
 
-    elif audience_type == "Genitore di atleta":
-        if not athletes:
-            st.warning("Nessun atleta collegato alle tue categorie.")
-            return
-        ath_label_map = {f"{a.name} ({a.id})": a.id for a in athletes}
-        label = st.selectbox("Atleta", list(ath_label_map.keys()))
-        selected_athlete_id = ath_label_map[label]
+    if mode == "Solo una categoria":
+        cat_names = {c.name: c.id for c in categories}
+        selected = st.selectbox("Categoria", list(cat_names.keys()))
+        target_category_id = cat_names[selected]
 
-    with st.form("new_message"):
-        title = st.text_input("Titolo", "")
-        content = st.text_area("Contenuto", "", height=150)
-        submitted = st.form_submit_button("Invia messaggio")
-
-    if submitted:
-        if not title.strip() or not content.strip():
-            st.error("Titolo e contenuto sono obbligatori.")
-            return
-
-        msg = Message(
-            sender_id=user.id,
-            category_id=selected_category_id,
-            athlete_id=selected_athlete_id,
-            title=title.strip(),
-            content=content.strip(),
+    elif mode == "Per atleta":
+        # elenco atleti delle categorie del coach
+        athletes = (
+            db.query(Athlete)
+            .filter(Athlete.category_id.in_(cat_ids))
+            .order_by(Athlete.name.asc())
+            .all()
         )
+        if not athletes:
+            st.info("Nessun atleta collegato alle tue categorie.")
+            return
+        ath_labels = {a.name: a.id for a in athletes}
+        selected = st.selectbox("Atleta", list(ath_labels.keys()))
+        target_athlete_id = ath_labels[selected]
+
+    title = st.text_input("Titolo", value="")
+    content = st.text_area("Contenuto", height=150)
+
+    if st.button("Invia comunicazione"):
+        if not title or not content:
+            st.warning("Inserisci titolo e contenuto.")
+            return
+
+        parent_ids: Set[int] = set()
+
+        if mode == "Tutti i genitori delle mie categorie":
+            for c in categories:
+                parent_ids |= _collect_parent_ids_for_category(db, c.id)
+            msg = Message(
+                sender_id=user.id,
+                title=title,
+                content=content,
+                category_id=None,
+                athlete_id=None,
+            )
+        elif mode == "Solo una categoria" and target_category_id:
+            parent_ids |= _collect_parent_ids_for_category(db, target_category_id)
+            msg = Message(
+                sender_id=user.id,
+                title=title,
+                content=content,
+                category_id=target_category_id,
+                athlete_id=None,
+            )
+        elif mode == "Per atleta" and target_athlete_id:
+            parent_ids |= _collect_parent_ids_for_athlete(db, target_athlete_id)
+            msg = Message(
+                sender_id=user.id,
+                title=title,
+                content=content,
+                category_id=None,
+                athlete_id=target_athlete_id,
+            )
+        else:
+            st.warning("Seleziona correttamente i destinatari.")
+            return
+
         db.add(msg)
         db.commit()
-        st.success("Messaggio inviato.")
-        notify_message_created(db, msg)
 
+        tokens = _get_tokens_for_users(db, list(parent_ids))
+        result = send_push_to_tokens(tokens, title=title, body=content)
 
-# ---------- REPORT ----------
-
-def _render_reports_view(
-    db: Session,
-    user: User,
-    categories: list[Category],
-    cat_ids: list[int],
-) -> None:
-    st.subheader("Report allenamenti / gare")
-
-    events = (
-        db.query(Event)
-        .filter(Event.category_id.in_(cat_ids))
-        .order_by(Event.date.desc())
-        .all()
-    )
-    if not events:
-        st.info("Nessun evento disponibile per i report.")
-        return
-
-    cat_map = {c.id: c for c in categories}
-    options = {
-        f"{ev.date} · {ev.title} ({cat_map.get(ev.category_id).name})": ev.id
-        for ev in events
-    }
-    label = st.selectbox("Evento", list(options.keys()))
-    event_id = options[label]
-    event = next(e for e in events if e.id == event_id)
-
-    st.markdown(f"### {event.date} · {event.title}")
-
-    # ----- REPORT GENERALE SQUADRA -----
-    team_rep = (
-        db.query(TeamReport)
-        .filter(
-            TeamReport.event_id == event.id,
-            TeamReport.coach_id == user.id,
-        )
-        .first()
-    )
-
-    default_content = team_rep.content if team_rep else ""
-    content = st.text_area(
-        "Report generale (visibile a tutti i genitori della categoria)",
-        value=default_content,
-        height=150,
-        key=f"teamrep_{event.id}",
-    )
-
-    if st.button("Salva report generale", key=f"save_teamrep_{event.id}"):
-        if team_rep is None:
-            team_rep = TeamReport(
-                event_id=event.id,
-                coach_id=user.id,
-                content=content.strip(),
-            )
-            db.add(team_rep)
+        if result.get("ok"):
+            st.success(f"Messaggio salvato e notifiche inviate a {len(tokens)} dispositivi.")
         else:
-            team_rep.content = content.strip()
-            team_rep.created_at = datetime.utcnow()
-        db.commit()
-        st.success("Report generale salvato.")
-        notify_team_report(db, team_rep)
-
-    st.markdown("---")
-    st.markdown("### Report personali per atleta")
-
-    rows = (
-        db.query(EventAttendance, Athlete)
-        .join(Athlete, EventAttendance.athlete_id == Athlete.id)
-        .filter(EventAttendance.event_id == event.id)
-        .order_by(Athlete.name.asc())
-        .all()
-    )
-
-    if not rows:
-        st.info("Nessun atleta per questo evento.")
-        return
-
-    for att, athlete in rows:
-        st.markdown(f"**{athlete.name}**")
-
-        a_rep = (
-            db.query(AthleteReport)
-            .filter(
-                AthleteReport.event_id == event.id,
-                AthleteReport.athlete_id == athlete.id,
-                AthleteReport.coach_id == user.id,
+            st.warning(
+                f"Messaggio salvato ma problema nell'invio notifiche: {result.get('reason')}"
             )
-            .first()
-        )
-
-        default_note = a_rep.content if a_rep else ""
-        note = st.text_area(
-            "Nota personale (visibile solo al genitore di questo atleta)",
-            value=default_note,
-            height=80,
-            key=f"arep_{event.id}_{athlete.id}",
-        )
-
-        if st.button("Salva nota", key=f"save_arep_{event.id}_{athlete.id}"):
-            if a_rep is None:
-                a_rep = AthleteReport(
-                    event_id=event.id,
-                    athlete_id=athlete.id,
-                    coach_id=user.id,
-                    content=note.strip(),
-                )
-                db.add(a_rep)
-            else:
-                a_rep.content = note.strip()
-                a_rep.created_at = datetime.utcnow()
-            db.commit()
-            st.success(f"Nota salvata per {athlete.name}.")
-            notify_athlete_report(db, a_rep)
-
-        st.markdown("---")
+            st.json(result.get("response", {}))
 
 
-# ---------- IMPOSTAZIONI (FCM TOKEN) ----------
+def _render_reports_tab(db: Session, user: User):
+    st.subheader("Report di squadra")
+    st.info("In questa versione demo i report sono ancora in sola lettura / placeholder.")
 
-def _render_settings_view(db: Session, user: User) -> None:
-    st.subheader("Impostazioni notifiche")
 
-    st.markdown(
-        "Per ricevere notifiche push, incolla qui il tuo **Firebase device token** "
-        "(ottenuto dalla app / browser)."
+# --------- ENTRY POINT ----------
+
+
+def render_coach_dashboard(db: Session, user: User):
+    st.header("Pannello Allenatore")
+
+    tab_eventi, tab_comunicazioni, tab_report = st.tabs(
+        ["Eventi", "Comunicazioni", "Report"]
     )
 
-    existing = (
-        db.query(DeviceToken)
-        .filter(DeviceToken.user_id == user.id)
-        .order_by(DeviceToken.created_at.desc())
-        .first()
-    )
+    with tab_eventi:
+        _render_events_tab(db, user)
 
-    default_token = existing.token if existing else ""
+    with tab_comunicazioni:
+        _render_comunicazioni_tab(db, user)
 
-    with st.form("fcm_token_form_coach"):
-        token = st.text_input("FCM device token", value=default_token)
-        submitted = st.form_submit_button("Salva token")
-
-    if submitted:
-        token = token.strip()
-        if not token:
-            st.error("Il token non può essere vuoto.")
-            return
-
-        row = (
-            db.query(DeviceToken)
-            .filter(DeviceToken.user_id == user.id)
-            .first()
-        )
-        if row:
-            row.token = token
-            row.last_used_at = datetime.utcnow()
-        else:
-            row = DeviceToken(user_id=user.id, platform="web", token=token)
-            db.add(row)
-
-        db.commit()
-        st.success("Token salvato. Ora puoi ricevere notifiche push.")
+    with tab_report:
+        _render_reports_tab(db, user)
