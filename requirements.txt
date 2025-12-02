@@ -1,19 +1,12 @@
-streamlit==1.37.0
-sqlalchemy==2.0.23
-pydantic==2.4.2
+streamlit>=1.32
+sqlalchemy>=2.0
 python-dateutil
-requests
 pytz
+requests
 
-# Database SQLite
-aiosqlite
-sqlite-utils
-
-# Google Firebase Admin SDK (per notifiche push)
-firebase-admin==6.4.0
+# Firebase Admin SDK (necessario per FCM)
+firebase-admin==6.2.0
 google-auth==2.23.4
-google-auth-httplib2==0.2.0
-google-api-python-client==2.107.0
 
-# Utils
+# Dotenv (se vogliamo caricare secrets locali)
 python-dotenv
