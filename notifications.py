@@ -1,149 +1,104 @@
 # core/notifications.py
 #
-# Integrazione Firebase Cloud Messaging (FCM) per l'app Sci Club Val d'Ayas.
-# Usa il service account salvato nei secrets Streamlit:
+# Wrapper semplice per inviare notifiche FCM (Firebase Cloud Messaging)
+# dal backend Streamlit (Python).
 #
-# FIREBASE_PROJECT_ID
-# FIREBASE_SERVICE_ACCOUNT_JSON
-#
-# Funzioni principali:
-# - send_push_to_tokens(tokens, title, body, data)
-# - send_push_to_user_ids(db, user_ids, title, body, data)  [per il futuro]
+# Ritorna sempre una tupla:
+#   (success_count, total_tokens, error_msg | None)
 
 from __future__ import annotations
 
-import json
-from typing import Iterable, Dict, Any, Tuple, List
+import os
+from typing import Iterable, Tuple, Optional, Dict
 
-import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, messaging
-from sqlalchemy.orm import Session
 
-from core.models import DeviceToken
+# Percorso del file JSON del service account.
+# Metti firebase_service_account.json nella root del progetto (stesso livello di streamlit_app.py)
+SERVICE_ACCOUNT_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(__file__)),  # salgo da core/ a root
+    "firebase_service_account.json",
+)
 
-
-# ---------- INIT FIREBASE APP ----------
-
-def _get_firebase_app():
-    """
-    Inizializza Firebase Admin usando il JSON del service account
-    presente nei secrets Streamlit.
-
-    Ritorna:
-        - istanza di firebase_admin.App se ok
-        - None se non configurato
-    """
-    # Se è già inizializzato, lo riuso
-    if firebase_admin._apps:
-        return firebase_admin.get_app()
-
-    sa_json = st.secrets.get("FIREBASE_SERVICE_ACCOUNT_JSON", None)
-    if not sa_json:
-        # Nessuna configurazione trovata
-        return None
-
-    # Nei secrets lo abbiamo salvato come stringona JSON
-    if isinstance(sa_json, str):
-        try:
-            data = json.loads(sa_json)
-        except json.JSONDecodeError:
-            # Config sbagliata
-            return None
-    elif isinstance(sa_json, dict):
-        data = sa_json
-    else:
-        return None
-
-    try:
-        cred = credentials.Certificate(data)
-        app = firebase_admin.initialize_app(cred)
-        return app
-    except Exception as e:
-        # In caso di errore di inizializzazione mostro un messaggio nell'interfaccia
-        st.warning(f"Errore inizializzazione Firebase Admin: {e}")
-        return None
+_firebase_app: Optional[firebase_admin.App] = None
 
 
-# ---------- FUNZIONI PUBBLICHE ----------
+def _init_firebase_app() -> firebase_admin.App:
+    """Inizializza l'SDK Admin di Firebase una volta sola (singleton)."""
+    global _firebase_app
+    if _firebase_app is not None:
+        return _firebase_app
+
+    if not os.path.exists(SERVICE_ACCOUNT_PATH):
+        raise RuntimeError(
+            f"File service account Firebase non trovato: {SERVICE_ACCOUNT_PATH}"
+        )
+
+    cred = credentials.Certificate(SERVICE_ACCOUNT_PATH)
+    _firebase_app = firebase_admin.initialize_app(cred)
+    return _firebase_app
+
 
 def send_push_to_tokens(
     tokens: Iterable[str],
     title: str,
     body: str,
-    data: Dict[str, Any] | None = None,
-) -> Tuple[int, int, str | None]:
+    data: Optional[Dict[str, str]] = None,
+) -> Tuple[int, int, Optional[str]]:
     """
     Invia una notifica push a una lista di token FCM.
 
-    Ritorna:
-        (success_count, total_tokens, error_message)
+    :param tokens: lista/iterabile di token (stringhe)
+    :param title: titolo della notifica
+    :param body: testo della notifica
+    :param data: dizionario opzionale di dati extra (solo stringhe)
+    :return: (success_count, total_tokens, error_msg | None)
     """
-    # Pulizia token vuoti / spaziati
-    token_list: List[str] = [t.strip() for t in tokens if t and t.strip()]
+    # Normalizzo la lista di token
+    token_list = [t.strip() for t in tokens if t and str(t).strip()]
     total = len(token_list)
+
     if total == 0:
-        return 0, 0, "Nessun token valido specificato."
+        return 0, 0, "Nessun token valido fornito."
 
-    app = _get_firebase_app()
-    if app is None:
-        return 0, total, "Firebase Admin non è configurato (controlla i secrets)."
+    try:
+        _init_firebase_app()
 
-    data = data or {}
-    # Tutti i valori in data devono essere stringhe
-    data = {str(k): str(v) for k, v in data.items()}
+        # Data: deve essere {str: str}
+        clean_data: Dict[str, str] = {}
+        if data:
+            for k, v in data.items():
+                clean_data[str(k)] = str(v)
 
-    messages: List[messaging.Message] = []
-    for t in token_list:
-        msg = messaging.Message(
-            token=t,
+        message = messaging.MulticastMessage(
             notification=messaging.Notification(
                 title=title,
                 body=body,
             ),
-            data=data,
+            tokens=token_list,
+            data=clean_data or None,
         )
-        messages.append(msg)
 
-    try:
-        # send_all invia in batch
-        response = messaging.send_all(messages, app=app)
+        response = messaging.send_multicast(message)
+
         success = response.success_count
-        failure = response.failure_count
+        failures = response.failure_count
 
-        if failure > 0:
-            # Raccolgo un breve messaggio di errore generico
-            error_msg = f"{success} inviati, {failure} falliti."
-        else:
-            error_msg = None
+        error_msg: Optional[str] = None
+        if failures:
+            # raccolgo qualche dettaglio degli errori (max 3 per non esagerare)
+            details = []
+            for idx, resp in enumerate(response.responses):
+                if not resp.success:
+                    token_preview = token_list[idx][:16] + "…" if len(token_list[idx]) > 16 else token_list[idx]
+                    details.append(f"{token_preview}: {resp.exception}")
+            if details:
+                error_msg = "; ".join(details[:3])
 
         return success, total, error_msg
 
     except Exception as e:
-        return 0, total, f"Errore nell'invio delle notifiche: {e}"
-
-
-def send_push_to_user_ids(
-    db: Session,
-    user_ids: Iterable[int],
-    title: str,
-    body: str,
-    data: Dict[str, Any] | None = None,
-) -> Tuple[int, int, str | None]:
-    """
-    Versione che prende gli ID utente, recupera i token registrati
-    in tabella DeviceToken e poi chiama send_push_to_tokens.
-    (Utile per dopo, quando avremo il salvataggio dei token per ogni genitore.)
-    """
-    user_ids = list(user_ids)
-    if not user_ids:
-        return 0, 0, "Nessun utente specificato."
-
-    tokens = (
-        db.query(DeviceToken.token)
-        .filter(DeviceToken.user_id.in_(user_ids))
-        .all()
-    )
-    token_list = [t[0] for t in tokens]  # each row is a tuple (token,)
-
-    return send_push_to_tokens(token_list, title, body, data=data)
+        # Qualsiasi errore interno viene catturato e rimandato su error_msg,
+        # così lo vediamo a schermo invece di spaccare l'app.
+        return 0, total, f"Errore invio FCM: {e}"
