@@ -1,208 +1,149 @@
-# notifications.py
-"""
-Gestione notifiche push via Firebase Cloud Messaging (FCM).
+# core/notifications.py
+#
+# Integrazione Firebase Cloud Messaging (FCM) per l'app Sci Club Val d'Ayas.
+# Usa il service account salvato nei secrets Streamlit:
+#
+# FIREBASE_PROJECT_ID
+# FIREBASE_SERVICE_ACCOUNT_JSON
+#
+# Funzioni principali:
+# - send_push_to_tokens(tokens, title, body, data)
+# - send_push_to_user_ids(db, user_ids, title, body, data)  [per il futuro]
 
-IMPORTANTE:
-- Imposta la variabile d'ambiente FIREBASE_SERVER_KEY
-  negli "Secrets" di Streamlit Cloud.
-"""
+from __future__ import annotations
 
-import os
-from datetime import datetime
-from typing import Iterable, Sequence
+import json
+from typing import Iterable, Dict, Any, Tuple, List
 
-import requests
+import streamlit as st
+import firebase_admin
+from firebase_admin import credentials, messaging
+from sqlalchemy.orm import Session
 
-from core.models import (
-    User,
-    DeviceToken,
-    Message,
-    TeamReport,
-    AthleteReport,
-    Event,
-    ParentAthlete,
-    Athlete,
-)
+from core.models import DeviceToken
 
 
-FCM_ENDPOINT = "https://fcm.googleapis.com/fcm/send"
+# ---------- INIT FIREBASE APP ----------
+
+def _get_firebase_app():
+    """
+    Inizializza Firebase Admin usando il JSON del service account
+    presente nei secrets Streamlit.
+
+    Ritorna:
+        - istanza di firebase_admin.App se ok
+        - None se non configurato
+    """
+    # Se è già inizializzato, lo riuso
+    if firebase_admin._apps:
+        return firebase_admin.get_app()
+
+    sa_json = st.secrets.get("FIREBASE_SERVICE_ACCOUNT_JSON", None)
+    if not sa_json:
+        # Nessuna configurazione trovata
+        return None
+
+    # Nei secrets lo abbiamo salvato come stringona JSON
+    if isinstance(sa_json, str):
+        try:
+            data = json.loads(sa_json)
+        except json.JSONDecodeError:
+            # Config sbagliata
+            return None
+    elif isinstance(sa_json, dict):
+        data = sa_json
+    else:
+        return None
+
+    try:
+        cred = credentials.Certificate(data)
+        app = firebase_admin.initialize_app(cred)
+        return app
+    except Exception as e:
+        # In caso di errore di inizializzazione mostro un messaggio nell'interfaccia
+        st.warning(f"Errore inizializzazione Firebase Admin: {e}")
+        return None
 
 
-def _get_server_key() -> str | None:
-    return os.environ.get("FIREBASE_SERVER_KEY")
+# ---------- FUNZIONI PUBBLICHE ----------
 
-
-def _get_tokens_for_users(db, user_ids: Sequence[int]) -> list[str]:
-    if not user_ids:
-        return []
-
-    rows = (
-        db.query(DeviceToken)
-        .filter(DeviceToken.user_id.in_(list(user_ids)))
-        .all()
-    )
-    tokens: list[str] = []
-    for row in rows:
-        if row.token and row.token not in tokens:
-            tokens.append(row.token)
-            row.last_used_at = datetime.utcnow()
-    if rows:
-        db.commit()
-    return tokens
-
-
-def send_fcm_notification(
+def send_push_to_tokens(
     tokens: Iterable[str],
     title: str,
     body: str,
-    data: dict | None = None,
-) -> None:
-    """Invia una notifica FCM a una lista di device tokens."""
-    tokens = list(tokens)
-    if not tokens:
-        return
+    data: Dict[str, Any] | None = None,
+) -> Tuple[int, int, str | None]:
+    """
+    Invia una notifica push a una lista di token FCM.
 
-    server_key = _get_server_key()
-    if not server_key:
-        # Nessuna server key configurata: esco in silenzio
-        print("FCM: FIREBASE_SERVER_KEY non impostata, nessuna notifica inviata.")
-        return
+    Ritorna:
+        (success_count, total_tokens, error_message)
+    """
+    # Pulizia token vuoti / spaziati
+    token_list: List[str] = [t.strip() for t in tokens if t and t.strip()]
+    total = len(token_list)
+    if total == 0:
+        return 0, 0, "Nessun token valido specificato."
 
-    headers = {
-        "Authorization": f"key={server_key}",
-        "Content-Type": "application/json",
-    }
+    app = _get_firebase_app()
+    if app is None:
+        return 0, total, "Firebase Admin non è configurato (controlla i secrets)."
 
-    payload = {
-        "registration_ids": tokens,
-        "notification": {
-            "title": title,
-            "body": body,
-        },
-        "data": data or {},
-    }
+    data = data or {}
+    # Tutti i valori in data devono essere stringhe
+    data = {str(k): str(v) for k, v in data.items()}
+
+    messages: List[messaging.Message] = []
+    for t in token_list:
+        msg = messaging.Message(
+            token=t,
+            notification=messaging.Notification(
+                title=title,
+                body=body,
+            ),
+            data=data,
+        )
+        messages.append(msg)
 
     try:
-        resp = requests.post(FCM_ENDPOINT, json=payload, headers=headers, timeout=5)
-        print("FCM response:", resp.status_code, resp.text[:200])
-    except Exception as exc:
-        print("FCM error:", exc)
+        # send_all invia in batch
+        response = messaging.send_all(messages, app=app)
+        success = response.success_count
+        failure = response.failure_count
+
+        if failure > 0:
+            # Raccolgo un breve messaggio di errore generico
+            error_msg = f"{success} inviati, {failure} falliti."
+        else:
+            error_msg = None
+
+        return success, total, error_msg
+
+    except Exception as e:
+        return 0, total, f"Errore nell'invio delle notifiche: {e}"
 
 
-# ---------- NOTIFICHE DI ALTO LIVELLO ----------
+def send_push_to_user_ids(
+    db: Session,
+    user_ids: Iterable[int],
+    title: str,
+    body: str,
+    data: Dict[str, Any] | None = None,
+) -> Tuple[int, int, str | None]:
+    """
+    Versione che prende gli ID utente, recupera i token registrati
+    in tabella DeviceToken e poi chiama send_push_to_tokens.
+    (Utile per dopo, quando avremo il salvataggio dei token per ogni genitore.)
+    """
+    user_ids = list(user_ids)
+    if not user_ids:
+        return 0, 0, "Nessun utente specificato."
 
-def notify_message_created(db, msg: Message):
-    """Nuova comunicazione allenatore -> genitori."""
-    # Destinatari: genitori dipende da category_id / athlete_id
-    parent_user_ids: set[int] = set()
-
-    if msg.athlete_id:
-        links = (
-            db.query(ParentAthlete)
-            .filter(ParentAthlete.athlete_id == msg.athlete_id)
-            .all()
-        )
-        parent_user_ids.update(l.parent_id for l in links)
-
-    elif msg.category_id:
-        athletes = (
-            db.query(Athlete)
-            .filter(Athlete.category_id == msg.category_id)
-            .all()
-        )
-        ath_ids = [a.id for a in athletes]
-        if ath_ids:
-            links = (
-                db.query(ParentAthlete)
-                .filter(ParentAthlete.athlete_id.in_(ath_ids))
-                .all()
-            )
-            parent_user_ids.update(l.parent_id for l in links)
-    else:
-        # messaggio a tutto il club -> tutti i genitori
-        parents = db.query(User).filter(User.role == "parent").all()
-        parent_user_ids.update(p.id for p in parents)
-
-    tokens = _get_tokens_for_users(db, list(parent_user_ids))
-    if not tokens:
-        return
-
-    title = msg.title
-    body = msg.content[:120] + ("…" if len(msg.content) > 120 else "")
-    send_fcm_notification(tokens, title, body, data={"type": "message", "message_id": msg.id})
-
-
-def notify_logistics_changed(db, ev: Event):
-    """Richieste ski-room / carpool aggiornate per un evento."""
-    # Destinatari: tutti i genitori degli atleti della categoria
-    athletes = db.query(Athlete).filter(Athlete.category_id == ev.category_id).all()
-    ath_ids = [a.id for a in athletes]
-    if not ath_ids:
-        return
-
-    links = (
-        db.query(ParentAthlete)
-        .filter(ParentAthlete.athlete_id.in_(ath_ids))
+    tokens = (
+        db.query(DeviceToken.token)
+        .filter(DeviceToken.user_id.in_(user_ids))
         .all()
     )
-    parent_ids = list({l.parent_id for l in links})
-    tokens = _get_tokens_for_users(db, parent_ids)
-    if not tokens:
-        return
+    token_list = [t[0] for t in tokens]  # each row is a tuple (token,)
 
-    parts = []
-    if ev.ask_skiroom:
-        parts.append("sci in ski-room")
-    if ev.ask_carpool:
-        parts.append("auto disponibili")
-    if not parts:
-        body = "Richieste logistiche aggiornate."
-    else:
-        body = "L'allenatore ha chiesto: " + " e ".join(parts)
-
-    title = f"Aggiornamento {ev.date} · {ev.title}"
-    send_fcm_notification(tokens, title, body, data={"type": "logistics", "event_id": ev.id})
-
-
-def notify_team_report(db, report: TeamReport):
-    """Report di squadra: a tutti i genitori della categoria dell'evento."""
-    ev = report.event
-    if not ev:
-        return
-
-    athletes = db.query(Athlete).filter(Athlete.category_id == ev.category_id).all()
-    ath_ids = [a.id for a in athletes]
-    if not ath_ids:
-        return
-
-    links = (
-        db.query(ParentAthlete)
-        .filter(ParentAthlete.athlete_id.in_(ath_ids))
-        .all()
-    )
-    parent_ids = list({l.parent_id for l in links})
-    tokens = _get_tokens_for_users(db, parent_ids)
-    if not tokens:
-        return
-
-    title = f"Report squadra: {ev.date} · {ev.title}"
-    body = report.content[:160] + ("…" if report.content and len(report.content) > 160 else "")
-    send_fcm_notification(tokens, title, body, data={"type": "team_report", "event_id": ev.id})
-
-
-def notify_athlete_report(db, report: AthleteReport):
-    """Report personale atleta: solo ai genitori di quell'atleta."""
-    links = (
-        db.query(ParentAthlete)
-        .filter(ParentAthlete.athlete_id == report.athlete_id)
-        .all()
-    )
-    parent_ids = list({l.parent_id for l in links})
-    tokens = _get_tokens_for_users(db, parent_ids)
-    if not tokens:
-        return
-
-    ev = report.event
-    title = f"Report per {report.athlete.name} – {ev.date} · {ev.title}"
-    body = report.content[:160] + ("…" if report.content and len(report.content) > 160 else "")
-    send_fcm_notification(tokens, title, body, data={"type": "athlete_report", "event_id": ev.id})
+    return send_push_to_tokens(token_list, title, body, data=data)
